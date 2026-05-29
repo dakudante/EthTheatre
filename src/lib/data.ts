@@ -16,11 +16,120 @@ import type {
 
 /**
  * Single data-access surface for Server Components.
- * Uses Supabase when credentials are present; otherwise falls back to the
- * bundled demo dataset so the app is fully explorable out of the box.
+ *
+ * Two sources:
+ *  - DEMO_MODE (no Supabase env): bundled sample dataset.
+ *  - Live Supabase: the project's actual schema, which differs from the app's
+ *    internal model, so live rows are mapped to the app types here. Notably the
+ *    live DB has integer ids, `movie_name`/`screen_name`, `location` = city,
+ *    `address` = street, and NO is_now_playing / dcps / showtimes / tech_terms.
+ *    Mappers below bridge that gap; features needing absent tables degrade.
  */
 
 export const DEMO_MODE = !isSupabaseConfigured();
+
+const EPOCH = new Date(0).toISOString();
+
+// ----------------------------- Live row shapes -----------------------------
+interface DbMovieRow {
+  id: number | string;
+  movie_name: string | null;
+  runtime: number | null;
+  resolution: string | null;
+  "aspect_ratio and container_format": string | null;
+  audio_mix: string | null;
+  formats: string | null;
+}
+interface DbTheatreRow {
+  id: number | string;
+  name: string | null;
+  address: string | null;
+  location: string | null;
+  total_screens: number | null;
+}
+interface DbScreenRow {
+  id: number | string;
+  theatre_id: number | string;
+  screen_name: string | null;
+  screen_format: string | null;
+  projection_system: string | null;
+  sound_system: string | null;
+}
+
+function splitFormats(s: string | null): string[] {
+  return (s ?? "")
+    .split(/[,/|]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function mapMovie(r: DbMovieRow): Movie {
+  return {
+    id: String(r.id),
+    tmdb_id: null,
+    title: r.movie_name ?? "Untitled",
+    poster: null,
+    backdrop: null,
+    synopsis: null,
+    release_date: null,
+    duration: r.runtime ?? null,
+    genre: [],
+    format: splitFormats(r.formats),
+    is_now_playing: true, // live schema has no flag — treat catalogue as current
+    created_at: EPOCH,
+  };
+}
+
+function mapTheatre(r: DbTheatreRow): Theatre {
+  return {
+    id: String(r.id),
+    name: r.name ?? "Unnamed theatre",
+    location: r.address ?? r.location ?? "",
+    city: r.location ?? "", // live `location` column holds the city
+    lat: null,
+    lng: null,
+    images: [],
+    amenities: [],
+    description: null,
+    website: null,
+    created_at: EPOCH,
+  };
+}
+
+function mapScreen(r: DbScreenRow): Screen {
+  return {
+    id: String(r.id),
+    theatre_id: String(r.theatre_id),
+    name: r.screen_name ?? "Screen",
+    screen_format: r.screen_format ?? "Standard",
+    projection_system: r.projection_system ?? "—",
+    sound_system: r.sound_system ?? "—",
+    screen_spec: null,
+    number_of_seats: null,
+    three_d_system: null,
+    user_rating: 0,
+    review_count: 0,
+    created_at: EPOCH,
+  };
+}
+
+// The live `movies` row carries DCP-ish fields; reconstruct a package from it so
+// the ranking engine can still rank screens for that title.
+function syntheticDcp(r: DbMovieRow, screenId: string): Dcp {
+  return {
+    id: `dcp-${r.id}-${screenId}`,
+    screen_id: screenId,
+    movie_id: String(r.id),
+    runtime: r.runtime ?? null,
+    resolution: r.resolution ?? "2K 2048x1080",
+    format: splitFormats(r.formats),
+    aspect_ratio_container: r["aspect_ratio and container_format"] ?? "Flat(1.85:1)",
+    audio_mix: r.audio_mix ?? "Dolby Surround 5.1",
+    verified: false,
+    source: "Theatre catalogue",
+    created_at: EPOCH,
+  };
+}
 
 // ----------------------------- Showtimes -----------------------------------
 // Deterministic pseudo-random so a given screen+movie keeps stable times.
@@ -76,38 +185,42 @@ function generateShowtimes(screen: Screen, movie: Movie): Showtime[] {
 // ----------------------------- Movies --------------------------------------
 export async function getNowPlaying(): Promise<Movie[]> {
   if (DEMO_MODE) return demo.movies.filter((m) => m.is_now_playing);
-  const supabase = createClient();
-  const { data } = await supabase
-    .from("movies")
-    .select("*")
-    .eq("is_now_playing", true)
-    .order("release_date", { ascending: false });
-  return (data as Movie[]) ?? [];
+  // Live schema has no is_now_playing column — surface the whole catalogue.
+  return getAllMovies();
 }
 
 export async function getAllMovies(): Promise<Movie[]> {
   if (DEMO_MODE) return demo.movies;
   const supabase = createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("movies")
     .select("*")
-    .order("release_date", { ascending: false });
-  return (data as Movie[]) ?? [];
+    .order("movie_name", { ascending: true });
+  if (error) console.error("getAllMovies:", error.message);
+  return ((data as DbMovieRow[]) ?? []).map(mapMovie);
 }
 
 export async function getMovie(id: string): Promise<Movie | null> {
   if (DEMO_MODE) return demo.movies.find((m) => m.id === id) ?? null;
+  const row = await fetchMovieRow(id);
+  return row ? mapMovie(row) : null;
+}
+
+async function fetchMovieRow(id: string): Promise<DbMovieRow | null> {
   const supabase = createClient();
-  const { data } = await supabase.from("movies").select("*").eq("id", id).single();
-  return (data as Movie) ?? null;
+  const { data, error } = await supabase
+    .from("movies")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) console.error("fetchMovieRow:", error.message);
+  return (data as DbMovieRow) ?? null;
 }
 
 // --------------------------- Rankings ---------------------------------------
 async function getDcpsForMovie(movieId: string): Promise<Dcp[]> {
   if (DEMO_MODE) return demo.dcps.filter((d) => d.movie_id === movieId);
-  const supabase = createClient();
-  const { data } = await supabase.from("dcps").select("*").eq("movie_id", movieId);
-  return (data as Dcp[]) ?? [];
+  return []; // live schema has no dcps table
 }
 
 async function getScreensByIds(ids: string[]): Promise<Screen[]> {
@@ -115,28 +228,64 @@ async function getScreensByIds(ids: string[]): Promise<Screen[]> {
   if (DEMO_MODE) return demo.screens.filter((s) => ids.includes(s.id));
   const supabase = createClient();
   const { data } = await supabase.from("screens").select("*").in("id", ids);
-  return (data as Screen[]) ?? [];
-}
-
-async function getTheatresByIds(ids: string[]): Promise<Map<string, Theatre>> {
-  const map = new Map<string, Theatre>();
-  if (!ids.length) return map;
-  const list = DEMO_MODE
-    ? demo.theatres.filter((t) => ids.includes(t.id))
-    : (((await createClient().from("theatres").select("*").in("id", ids)).data as Theatre[]) ?? []);
-  list.forEach((t) => map.set(t.id, t));
-  return map;
+  return ((data as DbScreenRow[]) ?? []).map(mapScreen);
 }
 
 export async function getMovieRankings(movieId: string): Promise<RankedScreen[]> {
+  if (DEMO_MODE) return getMovieRankingsDemo(movieId);
+
+  // Live: rank ALL screens for this title using a synthetic DCP built from the
+  // movie row (resolution / aspect / audio / format it ships in).
+  const row = await fetchMovieRow(movieId);
+  if (!row) return [];
+  const movie = mapMovie(row);
+
+  const supabase = createClient();
+  const [{ data: screenRows }, { data: theatreRows }] = await Promise.all([
+    supabase.from("screens").select("*"),
+    supabase.from("theatres").select("*"),
+  ]);
+
+  const screens = ((screenRows as DbScreenRow[]) ?? []).map(mapScreen);
+  const theatres = new Map(
+    ((theatreRows as DbTheatreRow[]) ?? []).map((t) => [
+      String(t.id),
+      mapTheatre(t),
+    ]),
+  );
+
+  const candidates = screens.map((screen) => ({
+    screen,
+    dcp: syntheticDcp(row, screen.id),
+  }));
+
+  return rankScreens(movie, candidates)
+    .slice(0, 12)
+    .map((r) => {
+      const theatre = theatres.get(r.screen.theatre_id);
+      if (!theatre) return null;
+      return {
+        rank: r.rank,
+        score: r.score,
+        reason: r.reason,
+        screen: r.screen,
+        theatre,
+        dcp: r.dcp,
+        showtimes: generateShowtimes(r.screen, movie),
+      } satisfies RankedScreen;
+    })
+    .filter((x): x is RankedScreen => x !== null);
+}
+
+async function getMovieRankingsDemo(movieId: string): Promise<RankedScreen[]> {
   const movie = await getMovie(movieId);
   if (!movie) return [];
 
   const dcps = await getDcpsForMovie(movieId);
   const screenIds = Array.from(new Set(dcps.map((d) => d.screen_id)));
   const screens = await getScreensByIds(screenIds);
-  const theatres = await getTheatresByIds(
-    Array.from(new Set(screens.map((s) => s.theatre_id))),
+  const theatres = new Map(
+    demo.theatres.map((t) => [t.id, t] as const),
   );
 
   const dcpByScreen = new Map(dcps.map((d) => [d.screen_id, d]));
@@ -145,9 +294,7 @@ export async function getMovieRankings(movieId: string): Promise<RankedScreen[]>
     dcp: dcpByScreen.get(screen.id) ?? null,
   }));
 
-  const ranked = rankScreens(movie, candidates);
-
-  return ranked
+  return rankScreens(movie, candidates)
     .map((r) => {
       const theatre = theatres.get(r.screen.theatre_id);
       if (!theatre) return null;
@@ -168,27 +315,37 @@ export async function getMovieRankings(movieId: string): Promise<RankedScreen[]>
 export async function getTheatres(): Promise<Theatre[]> {
   if (DEMO_MODE) return demo.theatres;
   const supabase = createClient();
-  const { data } = await supabase.from("theatres").select("*").order("name");
-  return (data as Theatre[]) ?? [];
+  const { data, error } = await supabase
+    .from("theatres")
+    .select("*")
+    .order("name", { ascending: true });
+  if (error) console.error("getTheatres:", error.message);
+  return ((data as DbTheatreRow[]) ?? []).map(mapTheatre);
 }
 
 export async function getTheatre(id: string): Promise<Theatre | null> {
   if (DEMO_MODE) return demo.theatres.find((t) => t.id === id) ?? null;
   const supabase = createClient();
-  const { data } = await supabase.from("theatres").select("*").eq("id", id).single();
-  return (data as Theatre) ?? null;
+  const { data, error } = await supabase
+    .from("theatres")
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) console.error("getTheatre:", error.message);
+  return data ? mapTheatre(data as DbTheatreRow) : null;
 }
 
 export async function getScreensForTheatre(theatreId: string): Promise<Screen[]> {
   if (DEMO_MODE)
     return demo.screens.filter((s) => s.theatre_id === theatreId);
   const supabase = createClient();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("screens")
     .select("*")
     .eq("theatre_id", theatreId)
-    .order("user_rating", { ascending: false });
-  return (data as Screen[]) ?? [];
+    .order("screen_name", { ascending: true });
+  if (error) console.error("getScreensForTheatre:", error.message);
+  return ((data as DbScreenRow[]) ?? []).map(mapScreen);
 }
 
 // --------------------------- Screens ----------------------------------------
@@ -197,7 +354,13 @@ export async function getScreen(id: string): Promise<ScreenWithTheatre | null> {
   if (DEMO_MODE) {
     screen = demo.screens.find((s) => s.id === id) ?? null;
   } else {
-    screen = ((await createClient().from("screens").select("*").eq("id", id).single()).data as Screen) ?? null;
+    const { data, error } = await createClient()
+      .from("screens")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) console.error("getScreen:", error.message);
+    screen = data ? mapScreen(data as DbScreenRow) : null;
   }
   if (!screen) return null;
   const theatre = await getTheatre(screen.theatre_id);
@@ -211,13 +374,11 @@ export interface ScreenProgramme {
   showtimes: Showtime[];
 }
 
-export async function getScreenProgramme(screenId: string): Promise<ScreenProgramme[]> {
-  let dcps: Dcp[];
-  if (DEMO_MODE) {
-    dcps = demo.dcps.filter((d) => d.screen_id === screenId);
-  } else {
-    dcps = (((await createClient().from("dcps").select("*").eq("screen_id", screenId)).data) as Dcp[]) ?? [];
-  }
+export async function getScreenProgramme(
+  screenId: string,
+): Promise<ScreenProgramme[]> {
+  if (!DEMO_MODE) return []; // no movie↔screen linkage in the live schema
+  const dcps = demo.dcps.filter((d) => d.screen_id === screenId);
   const [screen] = await getScreensByIds([screenId]);
   if (!screen) return [];
   const out: ScreenProgramme[] = [];
@@ -230,27 +391,18 @@ export async function getScreenProgramme(screenId: string): Promise<ScreenProgra
 }
 
 // --------------------------- Tech terms -------------------------------------
+// Static educational content — always served from bundled data (the live DB
+// has no tech_terms table).
 export async function getTechTerms(): Promise<TechTerm[]> {
-  if (DEMO_MODE) return demo.techTerms;
-  const supabase = createClient();
-  const { data } = await supabase.from("tech_terms").select("*").order("title");
-  return (data as TechTerm[]) ?? [];
+  return demo.techTerms;
 }
 
 export async function getPopularTechTerms(): Promise<TechTerm[]> {
-  const all = await getTechTerms();
-  return all.filter((t) => t.is_popular);
+  return demo.techTerms.filter((t) => t.is_popular);
 }
 
 export async function getTechTerm(slug: string): Promise<TechTerm | null> {
-  if (DEMO_MODE) return demo.techTerms.find((t) => t.slug === slug) ?? null;
-  const supabase = createClient();
-  const { data } = await supabase
-    .from("tech_terms")
-    .select("*")
-    .eq("slug", slug)
-    .single();
-  return (data as TechTerm) ?? null;
+  return demo.techTerms.find((t) => t.slug === slug) ?? null;
 }
 
 // --------------------------- Search -----------------------------------------
