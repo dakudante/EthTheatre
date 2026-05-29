@@ -1,36 +1,94 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🎬 ScreenRank
 
-## Getting Started
+**Find the best screen for any movie** — ranked by the actual **DCP technical
+specification** first (resolution, format, aspect-ratio container, audio mix),
+and the room's raw **screen hardware** second. Every cinema-tech term is decoded
+into plain language with hover tooltips and visual explainers.
 
-First, run the development server:
+> Think _Letterboxd meets TechRadar_, in cinematic dark mode.
+
+## ✨ Features
+
+- **DCP-first ranking engine** — a transparent 0–100 score with a human-readable
+  reason for every screen ([`src/lib/ranking.ts`](src/lib/ranking.ts)). DCP
+  fidelity is weighted ~60%, hardware ~35%, crowd rating ~5%.
+- **Movie pages** with ranked screens, score rings, verified-DCP badges, spec
+  grids, and day-tabbed showtimes.
+- **Theatre & screen pages** with full technical spec sheets.
+- **Learn hub** — a glossary of cinema-tech terms (DCP, IMAX, Dolby Atmos, laser
+  projection, HDR, HFR, EPIQ…) with "at a glance" spec tables and related terms.
+  Jargon anywhere in the UI links here via tooltips.
+- **Search** across movies, theatres and tech terms.
+- **Admin console** (Supabase Auth, email/password) with a catalogue overview.
+- **Format-aware neon accents:** amber (premium), cyan (IMAX), violet (Dolby),
+  emerald (EPIQ/PXL) — glassmorphic cards, film-grain texture, Framer Motion.
+
+## 🧱 Tech stack
+
+| Layer    | Choice                                                          |
+| -------- | --------------------------------------------------------------- |
+| Frontend | Next.js 14 (App Router), TypeScript, Tailwind CSS, shadcn/ui    |
+| Motion   | Framer Motion · Lucide icons                                    |
+| Backend  | Supabase (PostgreSQL, RLS, Auth, Storage)                       |
+| Clients  | `@supabase/ssr` (server/middleware) · `@supabase/supabase-js`   |
+| External | TMDB API for movie metadata                                     |
+
+## 🚀 Getting started
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev      # served on http://localhost:3210 (see .claude/launch.json)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The app boots in **demo mode** with a bundled sample dataset
+([`src/lib/sample-data.ts`](src/lib/sample-data.ts)) — fully explorable with **no
+configuration**. To go live, add credentials:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+cp .env.local.example .env.local   # then fill in your keys
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Variable                         | Purpose                              |
+| -------------------------------- | ------------------------------------ |
+| `NEXT_PUBLIC_SUPABASE_URL`       | Supabase project URL                 |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY`  | Supabase anon key                    |
+| `SUPABASE_SERVICE_ROLE_KEY`      | Server-only writes / seeding         |
+| `TMDB_API_KEY`                   | TMDB v4 read-access token            |
 
-## Learn More
+When real Supabase credentials are present the data layer
+([`src/lib/data.ts`](src/lib/data.ts)) switches from the sample data to live
+queries automatically, and `/admin` requires authentication.
 
-To learn more about Next.js, take a look at the following resources:
+## 🗄️ Database
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+In the Supabase SQL editor (or via `supabase db push` / `supabase db reset`):
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+1. `supabase/migrations/0001_init.sql` — schema, indexes, RLS policies
+2. `supabase/seed.sql` — sample theatres, screens, movies, DCPs, tech terms
 
-## Deploy on Vercel
+RLS grants **public read** on all tables and **write to authenticated users**.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 📁 Project structure
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+src/
+  app/                 # App Router pages (home, movies, theatres, screens, learn, search, admin)
+  components/          # UI primitives (ui/) + ScreenRank components
+  lib/
+    ranking.ts         # the DCP-first scoring engine
+    data.ts            # data layer (Supabase ⇆ demo fallback)
+    sample-data.ts     # bundled demo dataset
+    tmdb.ts            # TMDB client
+    supabase/          # server / client / middleware
+supabase/
+  migrations/0001_init.sql
+  seed.sql
+```
+
+## ⚠️ Windows note
+
+This project folder name contains `&` (`Theatre&Cinema`), which breaks the
+default npm `.bin` shims on Windows. The `package.json` scripts therefore call
+the Next binary through `node` directly (`node node_modules/next/dist/bin/next
+…`) so `npm run dev` / `build` work regardless. Renaming the folder to remove
+the `&` would also resolve it.

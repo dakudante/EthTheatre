@@ -2,26 +2,117 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
+@layer base {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    /* ScreenRank runs dark-first; the light tokens exist for completeness. */
+    --background: 222 47% 5%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 40% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 45% 7%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 38 95% 58%;
+    --primary-foreground: 222 47% 8%;
+
+    --secondary: 217 33% 14%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 12%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 217 33% 16%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 33% 16%;
+    --input: 217 33% 16%;
+    --ring: 38 95% 58%;
+
+    --radius: 0.85rem;
   }
 }
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer components {
+  /* Glassmorphic card surface */
+  .glass {
+    @apply border border-white/10 bg-white/[0.03] backdrop-blur-xl;
+    box-shadow:
+      0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+      0 8px 40px -12px rgba(0, 0, 0, 0.6);
+  }
+
+  .glass-hover {
+    @apply transition-all duration-300 hover:border-white/20 hover:bg-white/[0.06];
+  }
+
+  /* Subtle film-grain overlay, applied to a fixed layer */
+  .film-grain::after {
+    content: "";
+    @apply pointer-events-none fixed inset-0 z-[1] bg-grain opacity-[0.035] mix-blend-overlay;
+    background-size: 200px;
+  }
+
+  .text-glow {
+    text-shadow: 0 0 24px hsl(var(--primary) / 0.35);
+  }
+
+  /* Format accent ring helpers */
+  .ring-format-imax {
+    box-shadow: 0 0 0 1px hsl(190 95% 55% / 0.4), 0 0 28px -6px hsl(190 95% 55% / 0.5);
+  }
+  .ring-format-dolby {
+    box-shadow: 0 0 0 1px hsl(265 90% 66% / 0.4), 0 0 28px -6px hsl(265 90% 66% / 0.5);
+  }
+  .ring-format-premium {
+    box-shadow: 0 0 0 1px hsl(38 95% 58% / 0.4), 0 0 28px -6px hsl(38 95% 58% / 0.5);
+  }
+  .ring-format-epiq {
+    box-shadow: 0 0 0 1px hsl(152 70% 50% / 0.4), 0 0 28px -6px hsl(152 70% 50% / 0.5);
+  }
 }
 
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+  /* Hide scrollbar but keep scrollable (used by horizontal rails) */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .shimmer {
+    @apply relative overflow-hidden;
+  }
+  .shimmer::before {
+    content: "";
+    @apply absolute inset-0 -translate-x-full;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.06),
+      transparent
+    );
+    animation: shimmer 2s infinite;
   }
 }
