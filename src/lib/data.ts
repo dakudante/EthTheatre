@@ -1,6 +1,7 @@
 import "server-only";
 
-import { createClient, isSupabaseConfigured } from "./supabase/server";
+import { isSupabaseConfigured } from "./supabase/server";
+import { createReadClient } from "./supabase/admin";
 import { rankScreens } from "./ranking";
 import * as demo from "./sample-data";
 import type {
@@ -191,7 +192,7 @@ export async function getNowPlaying(): Promise<Movie[]> {
 
 export async function getAllMovies(): Promise<Movie[]> {
   if (DEMO_MODE) return demo.movies;
-  const supabase = createClient();
+  const supabase = createReadClient();
   const { data, error } = await supabase
     .from("movies")
     .select("*")
@@ -207,7 +208,7 @@ export async function getMovie(id: string): Promise<Movie | null> {
 }
 
 async function fetchMovieRow(id: string): Promise<DbMovieRow | null> {
-  const supabase = createClient();
+  const supabase = createReadClient();
   const { data, error } = await supabase
     .from("movies")
     .select("*")
@@ -226,7 +227,7 @@ async function getDcpsForMovie(movieId: string): Promise<Dcp[]> {
 async function getScreensByIds(ids: string[]): Promise<Screen[]> {
   if (!ids.length) return [];
   if (DEMO_MODE) return demo.screens.filter((s) => ids.includes(s.id));
-  const supabase = createClient();
+  const supabase = createReadClient();
   const { data } = await supabase.from("screens").select("*").in("id", ids);
   return ((data as DbScreenRow[]) ?? []).map(mapScreen);
 }
@@ -240,7 +241,7 @@ export async function getMovieRankings(movieId: string): Promise<RankedScreen[]>
   if (!row) return [];
   const movie = mapMovie(row);
 
-  const supabase = createClient();
+  const supabase = createReadClient();
   const [{ data: screenRows }, { data: theatreRows }] = await Promise.all([
     supabase.from("screens").select("*"),
     supabase.from("theatres").select("*"),
@@ -314,7 +315,7 @@ async function getMovieRankingsDemo(movieId: string): Promise<RankedScreen[]> {
 // --------------------------- Theatres ---------------------------------------
 export async function getTheatres(): Promise<Theatre[]> {
   if (DEMO_MODE) return demo.theatres;
-  const supabase = createClient();
+  const supabase = createReadClient();
   const { data, error } = await supabase
     .from("theatres")
     .select("*")
@@ -325,7 +326,7 @@ export async function getTheatres(): Promise<Theatre[]> {
 
 export async function getTheatre(id: string): Promise<Theatre | null> {
   if (DEMO_MODE) return demo.theatres.find((t) => t.id === id) ?? null;
-  const supabase = createClient();
+  const supabase = createReadClient();
   const { data, error } = await supabase
     .from("theatres")
     .select("*")
@@ -338,7 +339,7 @@ export async function getTheatre(id: string): Promise<Theatre | null> {
 export async function getScreensForTheatre(theatreId: string): Promise<Screen[]> {
   if (DEMO_MODE)
     return demo.screens.filter((s) => s.theatre_id === theatreId);
-  const supabase = createClient();
+  const supabase = createReadClient();
   const { data, error } = await supabase
     .from("screens")
     .select("*")
@@ -354,7 +355,7 @@ export async function getScreen(id: string): Promise<ScreenWithTheatre | null> {
   if (DEMO_MODE) {
     screen = demo.screens.find((s) => s.id === id) ?? null;
   } else {
-    const { data, error } = await createClient()
+    const { data, error } = await createReadClient()
       .from("screens")
       .select("*")
       .eq("id", id)
