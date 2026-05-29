@@ -1,4 +1,49 @@
+import { z } from "zod";
 import type { Dcp, Movie, Screen } from "./types";
+
+// ── Input contracts ─────────────────────────────────────────────────────────
+// Canonical Zod schemas for everything that enters the ranking engine from an
+// untrusted boundary (HTTP query/route params). The engine's pure functions
+// still operate on already-typed domain objects; these schemas validate the
+// *identifiers and filters* a caller supplies before we touch the data layer.
+
+/** Screen/DCP format filters a client may request. */
+export const SCREEN_FORMATS = [
+  "2D",
+  "3D",
+  "IMAX",
+  "EPIQ",
+  "PXL",
+  "4DX",
+  "Scope",
+  "Flat",
+] as const;
+export type ScreenFormatFilter = (typeof SCREEN_FORMATS)[number];
+
+/** Query for "best screens for a movie" (optionally filtered by city/format). */
+export const RecommendationQuerySchema = z.object({
+  movieId: z.string().uuid(),
+  city: z.string().trim().min(1).max(120).optional(),
+  format: z.enum(SCREEN_FORMATS).optional(),
+});
+export type RecommendationQuery = z.infer<typeof RecommendationQuerySchema>;
+
+/** Identifies a single movie × screen (× optional DCP) ranking computation. */
+export const RankingParamsSchema = z.object({
+  movieId: z.string().uuid(),
+  screenId: z.string().uuid(),
+  dcpId: z.string().uuid().optional(),
+});
+export type RankingParams = z.infer<typeof RankingParamsSchema>;
+
+/**
+ * Validate ranking identifiers, returning a typed result. Throws a ZodError on
+ * invalid input — callers at trusted boundaries can use `.safeParse` directly
+ * when they prefer to handle the error shape themselves.
+ */
+export function parseRankingParams(input: unknown): RankingParams {
+  return RankingParamsSchema.parse(input);
+}
 
 /**
  * ScreenRank ranking engine.
