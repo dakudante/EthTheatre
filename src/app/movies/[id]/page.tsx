@@ -1,10 +1,11 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { CalendarDays, Clock, Film, Info, Trophy } from "lucide-react";
-import { getMovie, getMovieRankings } from "@/lib/data";
+import { getMovie, getMovieMasterDcp, getMovieRankings } from "@/lib/data";
 import { Poster, Backdrop } from "@/components/poster";
 import { FormatBadge } from "@/components/format-badge";
 import { RankedScreenCard } from "@/components/ranked-screen-card";
+import { MasterDcpSpec } from "@/components/master-dcp-spec";
 import { Reveal } from "@/components/reveal";
 import { formatRuntime, formatDate } from "@/lib/utils";
 
@@ -29,7 +30,10 @@ export default async function MoviePage({
   const movie = await getMovie(params.id);
   if (!movie) notFound();
 
-  const rankings = await getMovieRankings(movie.id);
+  const [rankings, masterDcp] = await Promise.all([
+    getMovieRankings(movie.id),
+    getMovieMasterDcp(movie.id),
+  ]);
   const best = rankings[0];
 
   return (
@@ -82,6 +86,13 @@ export default async function MoviePage({
             </p>
           )}
         </div>
+      </section>
+
+      {/* Master DCP spec (movie-level) */}
+      <section className="container mt-10">
+        <Reveal>
+          <MasterDcpSpec movie={movie} dcp={masterDcp} />
+        </Reveal>
       </section>
 
       {/* Rankings */}

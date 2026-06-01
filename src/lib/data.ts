@@ -233,10 +233,33 @@ async function fetchMovieRow(id: string): Promise<DbMovieRow | null> {
   return (data as DbMovieRow) ?? null;
 }
 
-// --------------------------- Rankings ---------------------------------------
-async function getDcpsForMovie(movieId: string): Promise<Dcp[]> {
+// --------------------------- DCPs / Master spec -----------------------------
+export async function getDcpsForMovie(movieId: string): Promise<Dcp[]> {
   if (DEMO_MODE) return demo.dcps.filter((d) => d.movie_id === movieId);
-  return []; // live schema has no dcps table
+  // Live schema has no dcps table; the movie row carries the master spec.
+  const row = await fetchMovieRow(movieId);
+  return row ? [syntheticDcp(row, "master")] : [];
+}
+
+const RES_RANK = (r?: string | null) => {
+  const v = (r ?? "").toLowerCase();
+  if (v.includes("8k")) return 3;
+  if (v.includes("4k")) return 2;
+  if (v.includes("2k")) return 1;
+  return 0;
+};
+
+/**
+ * The single "Master DCP Specification" to headline a movie page: the best
+ * available verified package (demo), or the spec the movie ships in (live).
+ */
+export async function getMovieMasterDcp(movieId: string): Promise<Dcp | null> {
+  const dcps = await getDcpsForMovie(movieId);
+  if (!dcps.length) return null;
+  return [...dcps].sort((a, b) => {
+    if (a.verified !== b.verified) return a.verified ? -1 : 1;
+    return RES_RANK(b.resolution) - RES_RANK(a.resolution);
+  })[0];
 }
 
 async function getScreensByIds(ids: string[]): Promise<Screen[]> {

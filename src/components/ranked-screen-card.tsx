@@ -96,34 +96,41 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
             <p className="text-sm leading-relaxed text-foreground/90">{reason}</p>
           </div>
 
-          {/* DCP spec grid */}
+          {/* Screen hardware (theatre-level; the DCP master spec lives at the
+              top of the movie page) */}
           <div className="mt-4">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              DCP specification
+              Screen hardware
             </p>
-            {dcp ? (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                <SpecTile label="Resolution" value={dcp.resolution} />
-                <SpecTile label="Aspect" value={dcp.aspect_ratio_container} />
-                <SpecTile label="Audio" value={dcp.audio_mix} />
-                <SpecTile
-                  label="Format"
-                  value={dcp.format.length ? dcp.format.join(", ") : "2D"}
-                />
+            <div className="grid grid-cols-2 gap-2">
+              <SpecTile label="Projection" value={screen.projection_system} />
+              <SpecTile label="Sound system" value={screen.sound_system} />
+              {screen.screen_spec && (
+                <SpecTile label="Screen size" value={screen.screen_spec} />
+              )}
+              <div
+                className={cn(
+                  "rounded-xl border bg-white/[0.03] px-3 py-2.5",
+                  accent.border,
+                )}
+              >
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Screen class
+                </p>
+                <p className={cn("mt-0.5 text-sm font-medium", accent.text)}>
+                  {screen.screen_format}
+                </p>
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                No confirmed package on record for this screen.
-              </p>
-            )}
-          </div>
-
-          {/* Hardware row */}
-          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-            <SpecTile label="Projection" value={screen.projection_system} />
-            <SpecTile label="Sound system" value={screen.sound_system} />
-            {screen.screen_spec && (
-              <SpecTile label="Screen" value={screen.screen_spec} />
+            </div>
+            {(screen.number_of_seats || screen.three_d_system) && (
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                {screen.number_of_seats ? (
+                  <span>Seats: {screen.number_of_seats.toLocaleString()}</span>
+                ) : null}
+                {screen.three_d_system ? (
+                  <span>3D: {screen.three_d_system}</span>
+                ) : null}
+              </div>
             )}
           </div>
 

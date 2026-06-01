@@ -75,17 +75,17 @@ export interface ScoredScreen {
 }
 
 const WEIGHTS = {
-  // DCP — the file fidelity (sums to 0.60)
+  // DCP — the file fidelity + how well it matches the room (sums to 0.65)
   dcpResolution: 0.18,
   dcpFormat: 0.16,
-  dcpAspect: 0.1,
+  dcpAspectCompatibility: 0.15, // DCP container ↔ screen format match
   dcpAudio: 0.12,
   dcpVerified: 0.04,
-  // Hardware — the room (sums to 0.35)
-  hwProjection: 0.14,
+  // Hardware — the room (sums to 0.30)
+  hwProjection: 0.11,
   hwSound: 0.1,
   hwScreenClass: 0.07,
-  hwScreenSize: 0.04,
+  hwScreenSize: 0.02,
   // Crowd (0.05)
   crowd: 0.05,
 };
@@ -110,16 +110,44 @@ function formatScore(dcpFormats: string[], movieFormats: string[]): number {
   return Math.min(1, s);
 }
 
-function aspectScore(container?: string | null): number {
-  const v = (container ?? "").toLowerCase();
-  // Scope (2.39) generally fills more of a premium screen than Flat (1.85).
-  if (v.includes("1.43") || v.includes("imax")) return 1; // full IMAX aperture
-  if (v.includes("1.90")) return 0.92; // digital IMAX
-  if (v.includes("2.39") || v.includes("2.40") || v.includes("scope"))
-    return 0.85;
-  if (v.includes("2.20") || v.includes("70mm")) return 0.95;
-  if (v.includes("1.85") || v.includes("flat")) return 0.65;
-  return 0.6;
+/**
+ * How well a DCP's aspect-ratio container matches the screen's native format.
+ * A Flat DCP belongs on a Flat screen and a Scope DCP on a Scope screen;
+ * mismatches mean wasted black bars (letterbox/pillarbox), so they're penalised.
+ */
+function aspectCompatibilityScore(
+  dcpContainer?: string | null,
+  screenFormat?: string | null,
+): number {
+  const dcp = (dcpContainer ?? "").toLowerCase();
+  const screen = (screenFormat ?? "").toLowerCase();
+
+  // Unknown / standard screen → neutral.
+  if (!screen || screen.includes("standard")) return 0.6;
+
+  // IMAX containers (detected by the "imax" token, not a bare ratio, so a
+  // "Flat(1.90:1)" digital container isn't mistaken for IMAX).
+  if (dcp.includes("imax")) {
+    if (dcp.includes("1.43") && screen.includes("70mm")) return 1;
+    if (dcp.includes("1.90") && screen.includes("imax") && !screen.includes("70mm"))
+      return 1;
+    if (screen.includes("imax")) return 0.9; // general IMAX match
+    return 0.4; // IMAX DCP on non-IMAX screen (normally gated out upstream)
+  }
+
+  const dcpFlat = dcp.includes("flat") || dcp.includes("1.85");
+  const dcpScope =
+    dcp.includes("scope") ||
+    dcp.includes("2.39") ||
+    dcp.includes("2.40") ||
+    dcp.includes("2.76");
+  const screenFlat = screen.includes("flat");
+  const screenScope = screen.includes("scope");
+
+  if (dcpFlat && screenFlat) return 1;
+  if (dcpScope && screenScope) return 1;
+  if ((dcpFlat && screenScope) || (dcpScope && screenFlat)) return 0.5; // mismatch
+  return 0.6; // neutral (PLF / other screen classes)
 }
 
 function audioScore(mix?: string | null): number {
@@ -216,12 +244,16 @@ export function scoreScreen(
       accent: fmt >= 0.7 ? "premium" : "neutral",
     });
 
-    const asp = aspectScore(dcp.aspect_ratio_container);
+    const asp = aspectCompatibilityScore(
+      dcp.aspect_ratio_container,
+      screen.screen_format,
+    );
     push({
-      label: "Aspect ratio",
+      label: "Aspect match",
       detail: dcp.aspect_ratio_container,
       value: asp,
-      weight: WEIGHTS.dcpAspect,
+      weight: WEIGHTS.dcpAspectCompatibility,
+      accent: asp >= 1 ? "premium" : "neutral",
     });
 
     const aud = audioScore(dcp.audio_mix);
@@ -251,7 +283,7 @@ export function scoreScreen(
       weight:
         WEIGHTS.dcpResolution +
         WEIGHTS.dcpFormat +
-        WEIGHTS.dcpAspect +
+        WEIGHTS.dcpAspectCompatibility +
         WEIGHTS.dcpAudio +
         WEIGHTS.dcpVerified,
     });
@@ -332,8 +364,8 @@ function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
           return `${b.detail} sound`;
         case "Screen class":
           return `the ${b.detail} screen`;
-        case "Aspect ratio":
-          return `a ${b.detail} container`;
+        case "Aspect match":
+          return `a matched ${b.detail} container`;
         default:
           return b.detail;
       }
@@ -380,6 +412,16 @@ export function rankScreens(
   return candidates
     .filter(({ screen, dcp }) => isCompatible(screen, dcp))
     .map(({ screen, dcp }) => ({ screen, dcp, ...scoreScreen(movie, screen, dcp) }))
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      const scoreDiff = b.score - a.score;
+      // Clear winner on score.
+      if (Math.abs(scoreDiff) > 5) return scoreDiff;
+      // DCP-first tiebreak: a verified package beats an unverified/synthetic one
+      // when scores are within 5 points.
+      const aVerified = a.dcp?.verified ? 1 : 0;
+      const bVerified = b.dcp?.verified ? 1 : 0;
+      if (aVerified !== bVerified) return bVerified - aVerified;
+      return scoreDiff;
+    })
     .map((c, i) => ({ ...c, rank: i + 1 }));
 }
