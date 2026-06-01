@@ -354,12 +354,31 @@ function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
   );
 }
 
+const hasImax = (value?: string | null) =>
+  (value ?? "").toLowerCase().includes("imax");
+
+/**
+ * Whether a DCP can physically be presented on a given screen.
+ *
+ * An IMAX DCP (its `format` array contains "IMAX") can ONLY play on an IMAX
+ * screen, so non-IMAX screens are incompatible and must be excluded before
+ * scoring. The reverse is fine: an IMAX screen can present a standard DCP — it
+ * simply doesn't earn the IMAX format bonus.
+ */
+export function isCompatible(screen: Screen, dcp: Dcp | null): boolean {
+  if (!dcp) return true; // no package info — allow with a neutral score
+  const dcpIsImax = dcp.format.some((f) => hasImax(f));
+  if (dcpIsImax && !hasImax(screen.screen_format)) return false;
+  return true;
+}
+
 /** Rank a set of candidate screens for a movie (highest score first). */
 export function rankScreens(
   movie: Movie,
   candidates: { screen: Screen; dcp: Dcp | null }[],
 ) {
   return candidates
+    .filter(({ screen, dcp }) => isCompatible(screen, dcp))
     .map(({ screen, dcp }) => ({ screen, dcp, ...scoreScreen(movie, screen, dcp) }))
     .sort((a, b) => b.score - a.score)
     .map((c, i) => ({ ...c, rank: i + 1 }));

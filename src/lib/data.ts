@@ -198,7 +198,22 @@ export async function getAllMovies(): Promise<Movie[]> {
     .select("*")
     .order("movie_name", { ascending: true });
   if (error) console.error("getAllMovies:", error.message);
-  return ((data as DbMovieRow[]) ?? []).map(mapMovie);
+  // The live `movies` table stores one row per DCP variant, so the same title
+  // can appear several times. Listing grids represent the movie *entity*, so
+  // collapse to one card per unique title (the detail page still ranks every
+  // screen for it). Keeping the first occurrence is deterministic given the
+  // movie_name ordering above.
+  return dedupeByTitle(((data as DbMovieRow[]) ?? []).map(mapMovie));
+}
+
+function dedupeByTitle(movies: Movie[]): Movie[] {
+  const seen = new Set<string>();
+  return movies.filter((m) => {
+    const key = m.title.trim().toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export async function getMovie(id: string): Promise<Movie | null> {
