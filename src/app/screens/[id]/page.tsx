@@ -46,6 +46,31 @@ export default async function ScreenPage({
   const specs = [
     { icon: Projector, label: "Projection system", value: screen.projection_system },
     { icon: Speaker, label: "Sound system", value: screen.sound_system },
+    ...(screen.projector_brand
+      ? [
+          {
+            icon: Projector,
+            label: "Projector",
+            value: `${screen.projector_brand}${
+              screen.projector_model ? ` ${screen.projector_model}` : ""
+            }`,
+          },
+        ]
+      : []),
+    ...(screen.screen_brand
+      ? [
+          {
+            icon: Ruler,
+            label: "Screen brand",
+            value: `${screen.screen_brand}${
+              screen.screen_dimensions ? ` (${screen.screen_dimensions})` : ""
+            }`,
+          },
+        ]
+      : []),
+    ...(screen.screen_dimensions && !screen.screen_brand
+      ? [{ icon: Ruler, label: "Screen size", value: screen.screen_dimensions }]
+      : []),
     ...(screen.screen_spec
       ? [{ icon: Ruler, label: "Screen", value: screen.screen_spec }]
       : []),

@@ -1,4 +1,13 @@
-import type { Dcp, Movie, Screen, TechTerm, Theatre } from "./types";
+import type {
+  Dcp,
+  Movie,
+  MovieAvailableFormat,
+  MovieKeyframe,
+  Screen,
+  TechTerm,
+  Theatre,
+  TheatreInteriorTemplate,
+} from "./types";
 
 /**
  * Bundled demo dataset — powers the app in "demo mode" (no Supabase env).
@@ -70,7 +79,10 @@ export const screens: Screen[] = [
     sound_system: "IMAX 12 Channel",
     screen_spec: "88 x 47 feet curved silver screen",
     number_of_seats: 312, three_d_system: "IMAX 3D",
-    user_rating: 4.8, review_count: 1240, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.8, review_count: 1240, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   {
     id: "scr-a2", theatre_id: "th-aurora",
@@ -78,7 +90,10 @@ export const screens: Screen[] = [
     screen_format: "Dolby", projection_system: "4K Dual Laser",
     sound_system: "Dolby Atmos",
     screen_spec: "62 x 28 feet", number_of_seats: 180, three_d_system: "Dolby 3D",
-    user_rating: 4.6, review_count: 870, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.6, review_count: 870, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   {
     id: "scr-a3", theatre_id: "th-aurora",
@@ -86,7 +101,10 @@ export const screens: Screen[] = [
     screen_format: "Scope", projection_system: "2K Laser",
     sound_system: "Dolby Surround 7.1",
     screen_spec: "54 x 23 feet", number_of_seats: 220, three_d_system: null,
-    user_rating: 4.1, review_count: 410, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.1, review_count: 410, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   // Galaxy
   {
@@ -95,7 +113,10 @@ export const screens: Screen[] = [
     screen_format: "IMAX 70mm", projection_system: "IMAX 70mm Film + 4K Laser",
     sound_system: "IMAX 12 Channel",
     screen_spec: "96 x 70 feet", number_of_seats: 540, three_d_system: "IMAX 3D",
-    user_rating: 4.9, review_count: 2010, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.9, review_count: 2010, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   {
     id: "scr-b2", theatre_id: "th-galaxy",
@@ -103,7 +124,10 @@ export const screens: Screen[] = [
     screen_format: "EPIQ", projection_system: "4K RGB Laser",
     sound_system: "Dolby Atmos",
     screen_spec: "70 x 30 feet", number_of_seats: 240, three_d_system: "RealD",
-    user_rating: 4.7, review_count: 690, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.7, review_count: 690, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   {
     id: "scr-b3", theatre_id: "th-galaxy",
@@ -111,7 +135,10 @@ export const screens: Screen[] = [
     screen_format: "Flat", projection_system: "2K Xenon",
     sound_system: "Dolby Surround 5.1",
     screen_spec: "40 x 21 feet", number_of_seats: 160, three_d_system: null,
-    user_rating: 3.8, review_count: 230, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 3.8, review_count: 230, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   // Roxy
   {
@@ -120,7 +147,10 @@ export const screens: Screen[] = [
     screen_format: "Dolby", projection_system: "4K Dual Laser",
     sound_system: "Dolby Atmos",
     screen_spec: "64 x 27 feet", number_of_seats: 200, three_d_system: "Dolby 3D",
-    user_rating: 4.7, review_count: 980, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.7, review_count: 980, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   {
     id: "scr-c2", theatre_id: "th-roxy",
@@ -129,7 +159,10 @@ export const screens: Screen[] = [
     sound_system: "Dolby Atmos",
     screen_spec: "72 x 31 feet Imported STRONG MDI Silver Screen",
     number_of_seats: 260, three_d_system: "RealD",
-    user_rating: 4.6, review_count: 540, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.6, review_count: 540, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: "MDI",
+screen_dimensions: "72 x 31 ft",
   },
   {
     id: "scr-c3", theatre_id: "th-roxy",
@@ -137,7 +170,10 @@ export const screens: Screen[] = [
     screen_format: "4DX", projection_system: "4K Laser",
     sound_system: "Dolby Surround 7.1",
     screen_spec: "45 x 20 feet", number_of_seats: 140, three_d_system: "RealD",
-    user_rating: 4.3, review_count: 600, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.3, review_count: 600, created_at: "2024-01-01T00:00:00Z",  projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   // Northgate
   {
@@ -146,7 +182,10 @@ export const screens: Screen[] = [
     screen_format: "Scope", projection_system: "4K Laser",
     sound_system: "Dolby Atmos",
     screen_spec: "58 x 24 feet", number_of_seats: 230, three_d_system: null,
-    user_rating: 4.2, review_count: 350, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 4.2, review_count: 350, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
   {
     id: "scr-d2", theatre_id: "th-northgate",
@@ -154,7 +193,10 @@ export const screens: Screen[] = [
     screen_format: "Flat", projection_system: "2K Laser",
     sound_system: "Dolby Surround 5.1",
     screen_spec: "38 x 20 feet", number_of_seats: 150, three_d_system: null,
-    user_rating: 3.9, review_count: 180, created_at: "2024-01-01T00:00:00Z",
+    user_rating: 3.9, review_count: 180, created_at: "2024-01-01T00:00:00Z", projector_brand: null,
+projector_model: null,
+screen_brand: null,
+screen_dimensions: null,
   },
 ];
 
@@ -401,3 +443,8 @@ export const techTerms: TechTerm[] = [
     images: [], is_popular: false, created_at: "2024-01-01T00:00:00Z",
   },
 ];
+
+// Format Visualizer demo data (populated later; empty keeps demo mode working).
+export const keyframes: MovieKeyframe[] = [];
+export const interiorTemplates: TheatreInteriorTemplate[] = [];
+export const availableFormats: MovieAvailableFormat[] = [];

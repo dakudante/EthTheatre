@@ -1,4 +1,55 @@
 import { z } from "zod";
+
+// ── Projector Knowledge Base ───────────────────────────────────────────────
+const PROJECTOR_KNOWLEDGE_BASE: Record<string, {
+  type: "rgb-laser" | "phosphor-laser" | "xenon" | "unknown";
+  estimatedLumens: number;
+  resolution: "4K" | "2K";
+  isDciCompliant: boolean;
+}> = {
+  "BARCO SP4K-55B": { type: "rgb-laser", estimatedLumens: 55000, resolution: "4K", isDciCompliant: true },
+  "BARCO DP4K-19B": { type: "rgb-laser", estimatedLumens: 19000, resolution: "4K", isDciCompliant: true },
+  "BARCO DP2K-20C": { type: "xenon", estimatedLumens: 18500, resolution: "2K", isDciCompliant: true },
+  "NEC NP-NC900C-A": { type: "xenon", estimatedLumens: 9000, resolution: "2K", isDciCompliant: true },
+  "Christie 4K RGB Laser": { type: "rgb-laser", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
+  "Christie CP4440-RGB": { type: "rgb-laser", estimatedLumens: 40000, resolution: "4K", isDciCompliant: true },
+  "Christie 4K Xenon": { type: "xenon", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
+};
+
+function getProjectorSpecs(brand: string | null, model: string | null) {
+  if (!brand || !model) return null;
+  const key = `${brand} ${model}`;
+  return PROJECTOR_KNOWLEDGE_BASE[key] ?? null;
+}
+
+// ── Screen Brand Knowledge Base ────────────────────────────────────────────
+const SCREEN_BRAND_KNOWLEDGE: Record<string, {
+  gain: number;
+  material: "silver" | "matte-white" | "perlux" | "unknown";
+}> = {
+  "Harkness Hugo": { gain: 1.4, material: "silver" },
+  "Harkness Perlux": { gain: 1.0, material: "matte-white" },
+  "Harkness Clarus": { gain: 1.2, material: "matte-white" },
+  "STRONG MDI": { gain: 1.8, material: "silver" },
+  "MDI": { gain: 1.5, material: "silver" },
+};
+
+function getScreenSpecs(brand: string | null) {
+  if (!brand) return null;
+  return SCREEN_BRAND_KNOWLEDGE[brand] ?? null;
+}
+
+// ── Screen Dimensions Parser ───────────────────────────────────────────────
+function parseScreenDimensions(dimensions: string | null): { widthFt: number; heightFt: number; areaSqFt: number } | null {
+  if (!dimensions) return null;
+  const match = dimensions.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+  if (!match) return null;
+  const widthFt = parseFloat(match[1]);
+  const heightFt = parseFloat(match[2]);
+  return { widthFt, heightFt, areaSqFt: widthFt * heightFt };
+}
+
+// ---- types ----
 import type { Dcp, Movie, Screen } from "./types";
 
 // ── Input contracts ─────────────────────────────────────────────────────────
@@ -62,10 +113,14 @@ export function parseRankingParams(input: unknown): RankingParams {
 export interface ScoreBreakdown {
   label: string;
   detail: string;
-  /** 0..1 contribution within its own dimension */
   value: number;
   weight: number;
   accent: "imax" | "dolby" | "premium" | "epiq" | "neutral";
+  // NEW optional fields for enhanced scoring
+  projectorSpecBonus?: number;
+  screenGainMatch?: number;
+  pixelDensityAdequacy?: number;
+  brightnessEstimate?: number;
 }
 
 export interface ScoredScreen {
@@ -223,7 +278,53 @@ export function scoreScreen(
   const push = (
     b: Omit<ScoreBreakdown, "accent"> & { accent?: ScoreBreakdown["accent"] },
   ) => breakdown.push({ accent: "neutral", ...b });
+  // ── Enhanced hardware lookups (only used if data is available) ──
+  const projectorSpecs = getProjectorSpecs(screen.projector_brand, screen.projector_model);
+  const screenSpecs = getScreenSpecs(screen.screen_brand);
+  const screenDims = parseScreenDimensions(screen.screen_dimensions);
 
+  // Projector spec bonus (0..1) — trust factor when model is known
+  let projectorSpecBonus = 0;
+  if (projectorSpecs) {
+    if (projectorSpecs.type === "rgb-laser") projectorSpecBonus = 1.0;
+    else if (projectorSpecs.type === "phosphor-laser") projectorSpecBonus = 0.85;
+    else if (projectorSpecs.type === "xenon") projectorSpecBonus = 0.6;
+    else projectorSpecBonus = 0.5;
+  }
+
+  // Screen gain match (0..1) — does screen material suit the content?
+  let screenGainMatch = 0.6; // neutral default
+  if (screenSpecs && dcp) {
+    const is3D = dcp.format.some(f => f.toLowerCase().includes("3d"));
+    if (is3D && screenSpecs.material === "silver") screenGainMatch = 1.0;
+    else if (is3D && screenSpecs.material === "matte-white") screenGainMatch = 0.4;
+    else if (!is3D && screenSpecs.material === "silver") screenGainMatch = 0.7; // slight penalty for 2D on silver
+    else if (!is3D && screenSpecs.material === "matte-white") screenGainMatch = 1.0;
+  }
+
+  // Pixel density adequacy (0..1) — resolution vs screen size
+  let pixelDensityAdequacy = 0.7; // neutral
+  if (projectorSpecs && screenDims) {
+    const resWidth = projectorSpecs.resolution === "4K" ? 4096 : 2048;
+    const pixelsPerFoot = resWidth / screenDims.widthFt;
+    // 2K on 90ft = 22.7 px/ft (bad), 4K on 40ft = 102 px/ft (excellent)
+    if (pixelsPerFoot >= 80) pixelDensityAdequacy = 1.0;
+    else if (pixelsPerFoot >= 50) pixelDensityAdequacy = 0.9;
+    else if (pixelsPerFoot >= 30) pixelDensityAdequacy = 0.75;
+    else if (pixelsPerFoot >= 20) pixelDensityAdequacy = 0.5;
+    else pixelDensityAdequacy = 0.3;
+  }
+
+  // Brightness estimate (0..1) — lumens * gain / area
+  let brightnessEstimate = 0.7; // neutral
+  if (projectorSpecs && screenDims && screenSpecs) {
+    const nitsEstimate = (projectorSpecs.estimatedLumens * screenSpecs.gain) / (screenDims.areaSqFt * 0.3048 * 0.3048 * Math.PI);
+    if (nitsEstimate >= 100) brightnessEstimate = 1.0;
+    else if (nitsEstimate >= 60) brightnessEstimate = 0.9;
+    else if (nitsEstimate >= 40) brightnessEstimate = 0.75;
+    else if (nitsEstimate >= 25) brightnessEstimate = 0.55;
+    else brightnessEstimate = 0.35;
+  }
   // ---- DCP dimension ----
   if (dcp) {
     const res = resolutionScore(dcp.resolution);
@@ -324,7 +425,46 @@ export function scoreScreen(
     value: size,
     weight: WEIGHTS.hwScreenSize,
   });
+  // ── Enhanced hardware bonuses (only if data available) ──
+  if (projectorSpecs) {
+    push({
+      label: "Projector model",
+      detail: `${screen.projector_brand} ${screen.projector_model}`,
+      value: projectorSpecBonus,
+      weight: 0.03,
+      accent: projectorSpecBonus >= 0.9 ? "premium" : "neutral",
+    });
+  }
 
+  if (screenSpecs && dcp) {
+    push({
+      label: "Screen material",
+      detail: `${screen.screen_brand} (${screenSpecs.material}, gain ${screenSpecs.gain})`,
+      value: screenGainMatch,
+      weight: 0.03,
+      accent: screenGainMatch >= 0.9 ? "premium" : "neutral",
+    });
+  }
+
+  if (projectorSpecs && screenDims) {
+    push({
+      label: "Pixel density",
+      detail: `${projectorSpecs.resolution} on ${screenDims.widthFt}ft screen`,
+      value: pixelDensityAdequacy,
+      weight: 0.04,
+      accent: pixelDensityAdequacy >= 0.9 ? "premium" : "neutral",
+    });
+  }
+
+  if (projectorSpecs && screenDims && screenSpecs) {
+    push({
+      label: "Brightness estimate",
+      detail: `${projectorSpecs.estimatedLumens}lm × ${screenSpecs.gain} gain / ${Math.round(screenDims.areaSqFt)}sqft`,
+      value: brightnessEstimate,
+      weight: 0.03,
+      accent: brightnessEstimate >= 0.9 ? "premium" : "neutral",
+    });
+  }
   // ---- Crowd ----
   push({
     label: "Audience rating",
@@ -336,17 +476,32 @@ export function scoreScreen(
   });
 
   const total = breakdown.reduce((sum, b) => sum + b.value * b.weight, 0);
-  const score = Math.round(total * 1000) / 10; // 0..100, one decimal
+  // Enhanced hardware bonuses can push the weighted total past 1.0, so clamp to
+  // keep the score on a clean 0..100 scale.
+  const score = Math.min(100, Math.round(total * 1000) / 10); // 0..100, one decimal
 
   return { score, reason: buildReason(breakdown, dcp), breakdown };
 }
 
 function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
-  // Surface the two or three strongest weighted contributions.
-  const ranked = [...breakdown]
-    .filter((b) => b.label !== "Screen size" && b.label !== "Verification")
+  const candidates = breakdown.filter(
+    (b) =>
+      b.label !== "Screen size" &&
+      b.label !== "Verification" &&
+      b.label !== "Audience rating",
+  );
+  const ranked = [...candidates]
     .sort((a, b) => b.value * b.weight - a.value * a.weight)
     .slice(0, 3);
+
+  // A known top-tier projector carries a small weight, so it never makes the
+  // weighted top-3 — but it's a strong trust signal, so surface it explicitly.
+  const projector = candidates.find(
+    (b) => b.label === "Projector model" && b.value >= 0.9,
+  );
+  if (projector && !ranked.some((b) => b.label === "Projector model")) {
+    ranked.push(projector);
+  }
 
   const parts = ranked
     .filter((b) => b.value >= 0.7)
@@ -360,12 +515,20 @@ function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
           return `${b.detail} audio`;
         case "Projection":
           return `${b.detail} projection`;
+        case "Projector model":
+          return `${b.detail}`;
         case "Sound system":
           return `${b.detail} sound`;
         case "Screen class":
           return `the ${b.detail} screen`;
         case "Aspect match":
           return `a matched ${b.detail} container`;
+        case "Pixel density":
+          return `sharp ${b.detail}`;
+        case "Brightness estimate":
+          return `bright ${b.detail}`;
+        case "Screen material":
+          return `optimal ${b.detail}`;
         default:
           return b.detail;
       }

@@ -7,12 +7,15 @@ import * as demo from "./sample-data";
 import type {
   Dcp,
   Movie,
+  MovieAvailableFormat,
+  MovieKeyframe,
   RankedScreen,
   Screen,
   ScreenWithTheatre,
   Showtime,
   TechTerm,
   Theatre,
+  TheatreInteriorTemplate,
 } from "./types";
 
 /**
@@ -55,6 +58,11 @@ interface DbScreenRow {
   screen_format: string | null;
   projection_system: string | null;
   sound_system: string | null;
+  // NEW FIELDS
+  projector_brand: string | null;
+  projector_model: string | null;
+  screen_brand: string | null;
+  screen_dimensions: string | null;
 }
 
 function splitFormats(s: string | null): string[] {
@@ -111,6 +119,11 @@ function mapScreen(r: DbScreenRow): Screen {
     user_rating: 0,
     review_count: 0,
     created_at: EPOCH,
+    // NEW FIELDS
+    projector_brand: r.projector_brand ?? null,
+    projector_model: r.projector_model ?? null,
+    screen_brand: r.screen_brand ?? null,
+    screen_dimensions: r.screen_dimensions ?? null,
   };
 }
 
@@ -475,4 +488,48 @@ export async function search(query: string): Promise<SearchResults> {
         t.short_desc.toLowerCase().includes(q),
     ),
   };
+}
+// ── Format Visualizer data ──────────────────────────────────────────────
+
+export async function getMovieKeyframes(movieId: string): Promise<MovieKeyframe[]> {
+  if (DEMO_MODE) {
+    // Return demo keyframes from sample-data (we'll add these later)
+    return demo.keyframes?.filter((k) => k.movie_id === movieId) ?? [];
+  }
+  const supabase = createReadClient();
+  const { data, error } = await supabase
+    .from("movie_keyframes")
+    .select("*")
+    .eq("movie_id", movieId)
+    .order("display_order", { ascending: true });
+  if (error) console.error("getMovieKeyframes:", error.message);
+  return (data as MovieKeyframe[]) ?? [];
+}
+
+export async function getTheatreInteriorTemplates(): Promise<TheatreInteriorTemplate[]> {
+  if (DEMO_MODE) {
+    return demo.interiorTemplates ?? [];
+  }
+  const supabase = createReadClient();
+  const { data, error } = await supabase
+    .from("theatre_interior_templates")
+    .select("*")
+    .order("name", { ascending: true });
+  if (error) console.error("getTheatreInteriorTemplates:", error.message);
+  return (data as TheatreInteriorTemplate[]) ?? [];
+}
+
+export async function getMovieAvailableFormats(movieId: string): Promise<MovieAvailableFormat[]> {
+  if (DEMO_MODE) {
+    return demo.availableFormats?.filter((f) => f.movie_id === movieId) ?? [];
+  }
+  const supabase = createReadClient();
+  const { data, error } = await supabase
+    .from("movie_available_formats")
+    .select("*")
+    .eq("movie_id", movieId)
+    .eq("is_available", true)
+    .order("aspect_ratio", { ascending: true });
+  if (error) console.error("getMovieAvailableFormats:", error.message);
+  return (data as MovieAvailableFormat[]) ?? [];
 }

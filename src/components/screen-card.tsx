@@ -24,6 +24,30 @@ export function ScreenCard({ screen }: { screen: Screen }) {
         <Row icon={Speaker} label="Sound">
           <SpecValue value={screen.sound_system} />
         </Row>
+        {/* New hardware fields — only render when populated */}
+        {screen.projector_brand && (
+          <Row icon={Projector} label="Projector">
+            <SpecValue
+              value={`${screen.projector_brand}${
+                screen.projector_model ? ` ${screen.projector_model}` : ""
+              }`}
+            />
+          </Row>
+        )}
+        {screen.screen_brand && (
+          <Row icon={Ruler} label="Screen">
+            <SpecValue
+              value={`${screen.screen_brand}${
+                screen.screen_dimensions ? ` (${screen.screen_dimensions})` : ""
+              }`}
+            />
+          </Row>
+        )}
+        {screen.screen_dimensions && !screen.screen_brand && (
+          <Row icon={Ruler} label="Screen">
+            <SpecValue value={screen.screen_dimensions} />
+          </Row>
+        )}
         {screen.screen_spec && (
           <Row icon={Ruler} label="Screen">
             <SpecValue value={screen.screen_spec} />

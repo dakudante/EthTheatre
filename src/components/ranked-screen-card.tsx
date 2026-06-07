@@ -105,6 +105,26 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
             <div className="grid grid-cols-2 gap-2">
               <SpecTile label="Projection" value={screen.projection_system} />
               <SpecTile label="Sound system" value={screen.sound_system} />
+              {/* New hardware fields — only render when populated */}
+              {screen.projector_brand && (
+                <SpecTile
+                  label="Projector"
+                  value={`${screen.projector_brand}${
+                    screen.projector_model ? ` ${screen.projector_model}` : ""
+                  }`}
+                />
+              )}
+              {screen.screen_brand && (
+                <SpecTile
+                  label="Screen"
+                  value={`${screen.screen_brand}${
+                    screen.screen_dimensions ? ` (${screen.screen_dimensions})` : ""
+                  }`}
+                />
+              )}
+              {screen.screen_dimensions && !screen.screen_brand && (
+                <SpecTile label="Screen size" value={screen.screen_dimensions} />
+              )}
               {screen.screen_spec && (
                 <SpecTile label="Screen size" value={screen.screen_spec} />
               )}

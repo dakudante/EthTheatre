@@ -85,6 +85,10 @@ function serialize(r: RankedScreen, rank: number) {
       three_d_system: r.screen.three_d_system,
       user_rating: r.screen.user_rating,
       review_count: r.screen.review_count,
+      projector_brand: r.screen.projector_brand,
+      projector_model: r.screen.projector_model,
+      screen_brand: r.screen.screen_brand,
+      screen_dimensions: r.screen.screen_dimensions,
     },
     theatre: {
       id: r.theatre.id,

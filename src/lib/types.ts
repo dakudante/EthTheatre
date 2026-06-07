@@ -27,6 +27,11 @@ export interface Screen {
   user_rating: number;
   review_count: number;
   created_at: string;
+  // Technical hardware fields (live: from screens table; demo: null)
+  projector_brand: string | null;
+  projector_model: string | null;
+  screen_brand: string | null;
+  screen_dimensions: string | null;
 }
 
 export interface Movie {
@@ -112,4 +117,35 @@ export interface RankedScreen {
 
 export interface MovieWithRankings extends Movie {
   rankings: RankedScreen[];
+}
+export interface MovieKeyframe {
+  id: string;
+  movie_id: string;
+  storage_path: string;
+  description: string | null;
+  crop_gravity: string;
+  is_imax_native: boolean;
+  display_order: number;
+  created_at: string;
+}
+
+export interface TheatreInteriorTemplate {
+  id: string;
+  name: string;
+  screen_format: string;
+  storage_path: string;
+  aspect_ratio: string;
+  description: string | null;
+  created_at: string;
+}
+
+export interface MovieAvailableFormat {
+  id: string;
+  movie_id: string;
+  format_name: string;
+  aspect_ratio: string;
+  container_type: string;
+  is_available: boolean;
+  notes: string | null;
+  created_at: string;
 }
