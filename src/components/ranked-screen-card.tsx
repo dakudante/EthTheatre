@@ -1,10 +1,16 @@
 import Link from "next/link";
 import {
   BadgeCheck,
+  Cpu,
   MapPin,
+  Maximize,
+  MoveDiagonal,
+  Projector,
   Quote,
   Sparkles,
   Star,
+  Tv,
+  Volume2,
 } from "lucide-react";
 import type { RankedScreen } from "@/lib/types";
 import { accentFor } from "@/lib/format-config";
@@ -103,12 +109,21 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
               Screen hardware
             </p>
             <div className="grid grid-cols-2 gap-2">
-              <SpecTile label="Projection" value={screen.projection_system} />
-              <SpecTile label="Sound system" value={screen.sound_system} />
+              <SpecTile
+                label="Projection"
+                value={screen.projection_system}
+                icon={Projector}
+              />
+              <SpecTile
+                label="Sound system"
+                value={screen.sound_system}
+                icon={Volume2}
+              />
               {/* New hardware fields — only render when populated */}
               {screen.projector_brand && (
                 <SpecTile
                   label="Projector"
+                  icon={Cpu}
                   value={`${screen.projector_brand}${
                     screen.projector_model ? ` ${screen.projector_model}` : ""
                   }`}
@@ -117,16 +132,25 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
               {screen.screen_brand && (
                 <SpecTile
                   label="Screen"
+                  icon={Maximize}
                   value={`${screen.screen_brand}${
                     screen.screen_dimensions ? ` (${screen.screen_dimensions})` : ""
                   }`}
                 />
               )}
               {screen.screen_dimensions && !screen.screen_brand && (
-                <SpecTile label="Screen size" value={screen.screen_dimensions} />
+                <SpecTile
+                  label="Screen size"
+                  icon={MoveDiagonal}
+                  value={screen.screen_dimensions}
+                />
               )}
               {screen.screen_spec && (
-                <SpecTile label="Screen size" value={screen.screen_spec} />
+                <SpecTile
+                  label="Screen size"
+                  icon={MoveDiagonal}
+                  value={screen.screen_spec}
+                />
               )}
               <div
                 className={cn(
@@ -134,7 +158,8 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
                   accent.border,
                 )}
               >
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                <p className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <Tv className="size-3" />
                   Screen class
                 </p>
                 <p className={cn("mt-0.5 text-sm font-medium", accent.text)}>

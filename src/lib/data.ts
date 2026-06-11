@@ -8,6 +8,7 @@ import type {
   Dcp,
   Movie,
   MovieAvailableFormat,
+  MovieDcpVariants,
   MovieKeyframe,
   RankedScreen,
   Screen,
@@ -43,6 +44,17 @@ interface DbMovieRow {
   "aspect_ratio and container_format": string | null;
   audio_mix: string | null;
   formats: string | null;
+  // V2.0 columns (present after migration 0003; optional for older rows)
+  dcp_variants?: MovieDcpVariants | null;
+  aspect_ratio_primary?: string | null;
+  aspect_ratio_secondary?: string | null;
+  is_variable_aspect?: boolean | null;
+  aspect_ratio_variants?: string[] | null;
+  venue_types?: string[] | null;
+  has_3d?: boolean | null;
+  has_hfr?: boolean | null;
+  frame_rate?: number | null;
+  is_upscaled?: boolean | null;
 }
 interface DbTheatreRow {
   id: number | string;
@@ -86,6 +98,17 @@ function mapMovie(r: DbMovieRow): Movie {
     format: splitFormats(r.formats),
     is_now_playing: true, // live schema has no flag — treat catalogue as current
     created_at: EPOCH,
+    // V2.0
+    dcp_variants: r.dcp_variants ?? null,
+    aspect_ratio_primary: r.aspect_ratio_primary ?? null,
+    aspect_ratio_secondary: r.aspect_ratio_secondary ?? null,
+    is_variable_aspect: r.is_variable_aspect ?? false,
+    aspect_ratio_variants: r.aspect_ratio_variants ?? [],
+    venue_types: r.venue_types ?? [],
+    has_3d: r.has_3d ?? false,
+    has_hfr: r.has_hfr ?? false,
+    frame_rate: r.frame_rate ?? 24,
+    is_upscaled: r.is_upscaled ?? false,
   };
 }
 
@@ -246,12 +269,180 @@ async function fetchMovieRow(id: string): Promise<DbMovieRow | null> {
   return (data as DbMovieRow) ?? null;
 }
 
+// --------------------------- DCP variants (V2.0) ----------------------------
+// A movie's `dcp_variants` JSONB is the distributor spec sheet: which builds
+// ("4K 7.1 ATMO", "4K 12CH IMAX DMR", …) exist per venue class. We parse those
+// free-text specs, pick the best build a given screen can present, and convert
+// it into the internal Dcp shape the ranking engine consumes.
+
+export interface ParsedDcpVariant {
+  venueType: string;
+  resolution: string | null;
+  audioChannels: string | null;
+  audioFormat: string | null;
+  is3D: boolean;
+  rawSpec: string;
+}
+
+export function parseDcpVariant(raw: string): ParsedDcpVariant {
+  const lower = raw.toLowerCase();
+
+  let resolution: string | null = null;
+  if (lower.includes("8k")) resolution = "8K";
+  else if (lower.includes("4k")) resolution = "4K";
+  else if (lower.includes("2k")) resolution = "2K";
+
+  let audioFormat: string | null = null;
+  if (lower.includes("atmo")) audioFormat = "dolby_atmos";
+  else if (lower.includes("dts:x") || lower.includes("dts_x")) audioFormat = "dts_x";
+  else if (lower.includes("imax") && (lower.includes("ch") || lower.includes("channel")))
+    audioFormat = "imax";
+  else if (lower.includes("iab")) audioFormat = "iab";
+  else if (lower.includes("5.1") || lower.includes("7.1")) audioFormat = "standard";
+
+  let audioChannels: string | null = null;
+  if (lower.includes("12ch") || lower.includes("12 ch")) audioChannels = "12.0";
+  else if (lower.includes("5ch") || lower.includes("5 ch")) audioChannels = "5.0";
+  else if (lower.includes("7.1")) audioChannels = "7.1";
+  else if (lower.includes("5.1")) audioChannels = "5.1";
+
+  const is3D = lower.includes("3d");
+
+  return { venueType: "", resolution, audioChannels, audioFormat, is3D, rawSpec: raw };
+}
+
+export function getDcpVariantsForMovie(movie: Movie): ParsedDcpVariant[] {
+  if (!movie.dcp_variants) return [];
+  const variants: ParsedDcpVariant[] = [];
+
+  const add = (venueType: string, specs: string[] | null | undefined) => {
+    if (!specs) return;
+    for (const spec of specs) {
+      const parsed = parseDcpVariant(spec);
+      parsed.venueType = venueType;
+      variants.push(parsed);
+    }
+  };
+
+  add("normal", movie.dcp_variants.normal_venue);
+  add("atmos", movie.dcp_variants.atmos_venue);
+  add("imax", movie.dcp_variants.imax);
+  add("epiq", movie.dcp_variants.epiq);
+  add("dolby_cinema", movie.dcp_variants.dolby_cinema);
+
+  return variants;
+}
+
+export function selectBestDcpVariant(
+  movie: Movie,
+  screen: Screen,
+): ParsedDcpVariant | null {
+  const variants = getDcpVariantsForMovie(movie);
+  if (variants.length === 0) return null;
+
+  const screenHasAtmos = screen.sound_system.toLowerCase().includes("atmos");
+  const screenIsIMAX = screen.screen_format.toLowerCase().includes("imax");
+  const screenIsEPIQ = screen.screen_format.toLowerCase().includes("epiq");
+  const screenIsDolby = screen.screen_format.toLowerCase().includes("dolby");
+
+  let compatible = variants;
+
+  if (screenIsIMAX) {
+    const imax = variants.filter((v) => v.venueType === "imax");
+    if (imax.length > 0) compatible = imax;
+    else {
+      const atmos = variants.filter((v) => v.venueType === "atmos");
+      if (atmos.length > 0) compatible = atmos;
+    }
+  } else if (screenIsDolby) {
+    const dolby = variants.filter((v) => v.venueType === "dolby_cinema");
+    if (dolby.length > 0) compatible = dolby;
+    else {
+      const atmos = variants.filter((v) => v.venueType === "atmos");
+      if (atmos.length > 0) compatible = atmos;
+    }
+  } else if (screenHasAtmos) {
+    const atmos = variants.filter((v) => v.venueType === "atmos");
+    if (atmos.length > 0) compatible = atmos;
+  } else if (screenIsEPIQ) {
+    const epiq = variants.filter((v) => v.venueType === "epiq");
+    if (epiq.length > 0) compatible = epiq;
+  } else {
+    const normal = variants.filter((v) => v.venueType === "normal");
+    if (normal.length > 0) compatible = normal;
+  }
+
+  compatible = [...compatible].sort((a, b) => {
+    const resOrder: Record<string, number> = { "8K": 4, "4K": 3, "2K": 2 };
+    return (resOrder[b.resolution ?? ""] || 0) - (resOrder[a.resolution ?? ""] || 0);
+  });
+
+  return compatible[0] ?? null;
+}
+
+const VARIANT_AUDIO_LABELS: Record<string, string> = {
+  dolby_atmos: "Dolby Atmos",
+  dts_x: "DTS:X",
+  imax: "IMAX",
+  iab: "IAB",
+  standard: "Surround",
+};
+
+function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
+  const format: string[] = [];
+  if (variant.is3D) format.push("3D");
+  if (variant.venueType === "imax") format.push("IMAX");
+  if (variant.venueType === "epiq") format.push("EPIQ");
+  if (movie.venue_types.includes("Dolby Vision")) format.push("Dolby Vision");
+  if (movie.is_upscaled) format.push("Upscaled");
+
+  const resolution = variant.resolution || "2K";
+
+  let aspectRatio = movie.aspect_ratio_primary || "Scope(2.39:1)";
+  if (
+    variant.venueType === "imax" &&
+    movie.aspect_ratio_variants?.includes("IMAX 1.43:1")
+  ) {
+    aspectRatio = "IMAX(1.43:1)";
+  } else if (variant.venueType === "imax") {
+    aspectRatio = "IMAX(1.90:1)";
+  }
+
+  // Human-readable audio mix (e.g. "Dolby Atmos 7.1", "IMAX 12.0").
+  let audioMix =
+    VARIANT_AUDIO_LABELS[variant.audioFormat ?? ""] ?? (variant.audioFormat || "5.1");
+  if (variant.audioChannels && !audioMix.includes(variant.audioChannels)) {
+    audioMix += ` ${variant.audioChannels}`;
+  }
+
+  return {
+    id: `variant-${movie.id}-${variant.venueType}`,
+    screen_id: "",
+    movie_id: movie.id,
+    runtime: movie.duration || 0,
+    resolution,
+    format,
+    aspect_ratio_container: aspectRatio,
+    audio_mix: audioMix,
+    verified: false,
+    source: `distributor_sheet:${variant.venueType}`,
+    created_at: new Date().toISOString(),
+  };
+}
+
 // --------------------------- DCPs / Master spec -----------------------------
 export async function getDcpsForMovie(movieId: string): Promise<Dcp[]> {
   if (DEMO_MODE) return demo.dcps.filter((d) => d.movie_id === movieId);
-  // Live schema has no dcps table; the movie row carries the master spec.
+  // Live schema has no dcps table; prefer the V2 distributor variant sheet,
+  // falling back to the movie row's own spec columns.
   const row = await fetchMovieRow(movieId);
-  return row ? [syntheticDcp(row, "master")] : [];
+  if (!row) return [];
+  const movie = mapMovie(row);
+  const variants = getDcpVariantsForMovie(movie);
+  if (variants.length > 0) {
+    return variants.map((v) => convertVariantToDcp(v, movie));
+  }
+  return [syntheticDcp(row, "master")];
 }
 
 const RES_RANK = (r?: string | null) => {
@@ -306,10 +497,16 @@ export async function getMovieRankings(movieId: string): Promise<RankedScreen[]>
     ]),
   );
 
-  const candidates = screens.map((screen) => ({
-    screen,
-    dcp: syntheticDcp(row, screen.id),
-  }));
+  // V2.0: when the movie carries a distributor variant sheet, pick the best
+  // build each screen can present; otherwise fall back to the legacy synthetic
+  // DCP derived from the movie row's own spec columns.
+  const candidates = screens.map((screen) => {
+    const variant = selectBestDcpVariant(movie, screen);
+    return {
+      screen,
+      dcp: variant ? convertVariantToDcp(variant, movie) : syntheticDcp(row, screen.id),
+    };
+  });
 
   return rankScreens(movie, candidates)
     .slice(0, 12)

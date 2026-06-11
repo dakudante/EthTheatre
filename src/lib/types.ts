@@ -34,6 +34,16 @@ export interface Screen {
   screen_dimensions: string | null;
 }
 
+// Distributor spec sheet: which DCP builds exist for each venue class.
+export interface MovieDcpVariants {
+  normal_venue?: string[] | null;
+  atmos_venue?: string[] | null;
+  imax?: string[] | null;
+  epiq?: string[] | null;
+  dolby_cinema?: string[] | null;
+  barco_hdr?: boolean | null;
+}
+
 export interface Movie {
   id: string;
   tmdb_id: number | null;
@@ -47,6 +57,17 @@ export interface Movie {
   format: string[];
   is_now_playing: boolean;
   created_at: string;
+  // V2.0 — DCP variants & aspect-ratio metadata
+  dcp_variants: MovieDcpVariants | null;
+  aspect_ratio_primary: string | null;
+  aspect_ratio_secondary: string | null;
+  is_variable_aspect: boolean;
+  aspect_ratio_variants: string[];
+  venue_types: string[];
+  has_3d: boolean;
+  has_hfr: boolean;
+  frame_rate: number;
+  is_upscaled: boolean;
 }
 
 export interface Dcp {

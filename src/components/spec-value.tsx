@@ -25,13 +25,16 @@ export function SpecValue({
 export function SpecTile({
   label,
   value,
+  icon: Icon,
 }: {
   label: string;
   value: string;
+  icon?: React.ComponentType<{ className?: string }>;
 }) {
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
-      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      <p className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        {Icon && <Icon className="size-3" />}
         {label}
       </p>
       <div className="mt-0.5 text-sm font-medium">

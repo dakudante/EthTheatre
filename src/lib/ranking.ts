@@ -14,12 +14,24 @@ const PROJECTOR_KNOWLEDGE_BASE: Record<string, {
   "Christie 4K RGB Laser": { type: "rgb-laser", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
   "Christie CP4440-RGB": { type: "rgb-laser", estimatedLumens: 40000, resolution: "4K", isDciCompliant: true },
   "Christie 4K Xenon": { type: "xenon", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
+  "Barco SP4K 25C": { type: "rgb-laser", estimatedLumens: 25000, resolution: "4K", isDciCompliant: true },
+  "Barco SP4K 20C": { type: "rgb-laser", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
+  "Barco SP4K 35 series": { type: "rgb-laser", estimatedLumens: 35000, resolution: "4K", isDciCompliant: true },
+  "Barco DP4K 23B": { type: "rgb-laser", estimatedLumens: 23000, resolution: "4K", isDciCompliant: true },
 };
+
+// Case-insensitive lookups: live rows store brands in varying casing
+// ("BARCO SP4K-55B" vs KB key "Barco SP4K 25C").
+const PROJECTOR_KB_LOWER = new Map(
+  Object.entries(PROJECTOR_KNOWLEDGE_BASE).map(([k, v]) => [k.toLowerCase(), v]),
+);
 
 function getProjectorSpecs(brand: string | null, model: string | null) {
   if (!brand || !model) return null;
   const key = `${brand} ${model}`;
-  return PROJECTOR_KNOWLEDGE_BASE[key] ?? null;
+  return (
+    PROJECTOR_KNOWLEDGE_BASE[key] ?? PROJECTOR_KB_LOWER.get(key.toLowerCase()) ?? null
+  );
 }
 
 // ── Screen Brand Knowledge Base ────────────────────────────────────────────
@@ -30,13 +42,21 @@ const SCREEN_BRAND_KNOWLEDGE: Record<string, {
   "Harkness Hugo": { gain: 1.4, material: "silver" },
   "Harkness Perlux": { gain: 1.0, material: "matte-white" },
   "Harkness Clarus": { gain: 1.2, material: "matte-white" },
+  // Generic fallback — live rows often store just the manufacturer.
+  "Harkness": { gain: 1.0, material: "matte-white" },
   "STRONG MDI": { gain: 1.8, material: "silver" },
   "MDI": { gain: 1.5, material: "silver" },
 };
 
+const SCREEN_KB_LOWER = new Map(
+  Object.entries(SCREEN_BRAND_KNOWLEDGE).map(([k, v]) => [k.toLowerCase(), v]),
+);
+
 function getScreenSpecs(brand: string | null) {
   if (!brand) return null;
-  return SCREEN_BRAND_KNOWLEDGE[brand] ?? null;
+  return (
+    SCREEN_BRAND_KNOWLEDGE[brand] ?? SCREEN_KB_LOWER.get(brand.toLowerCase()) ?? null
+  );
 }
 
 // ── Screen Dimensions Parser ───────────────────────────────────────────────
@@ -71,9 +91,18 @@ export const SCREEN_FORMATS = [
 ] as const;
 export type ScreenFormatFilter = (typeof SCREEN_FORMATS)[number];
 
+/**
+ * Entity ids: demo data uses slugs/uuids, the live database uses integer ids,
+ * so accept a UUID or a plain numeric string.
+ */
+export const EntityIdSchema = z.union([
+  z.string().uuid(),
+  z.string().regex(/^\d+$/, "must be a UUID or numeric id"),
+]);
+
 /** Query for "best screens for a movie" (optionally filtered by city/format). */
 export const RecommendationQuerySchema = z.object({
-  movieId: z.string().uuid(),
+  movieId: EntityIdSchema,
   city: z.string().trim().min(1).max(120).optional(),
   format: z.enum(SCREEN_FORMATS).optional(),
 });
@@ -81,9 +110,9 @@ export type RecommendationQuery = z.infer<typeof RecommendationQuerySchema>;
 
 /** Identifies a single movie × screen (× optional DCP) ranking computation. */
 export const RankingParamsSchema = z.object({
-  movieId: z.string().uuid(),
-  screenId: z.string().uuid(),
-  dcpId: z.string().uuid().optional(),
+  movieId: EntityIdSchema,
+  screenId: EntityIdSchema,
+  dcpId: EntityIdSchema.optional(),
 });
 export type RankingParams = z.infer<typeof RankingParamsSchema>;
 
@@ -166,43 +195,138 @@ function formatScore(dcpFormats: string[], movieFormats: string[]): number {
 }
 
 /**
- * How well a DCP's aspect-ratio container matches the screen's native format.
- * A Flat DCP belongs on a Flat screen and a Scope DCP on a Scope screen;
- * mismatches mean wasted black bars (letterbox/pillarbox), so they're penalised.
+ * V2.0 aspect-ratio compatibility: how well a DCP's container matches the
+ * screen's native format, with support for variable-aspect titles (e.g. Dune 2
+ * switching IMAX 1.90 ↔ Scope 2.39) and for non-IMAX 1.90:1 movies (e.g.
+ * Lokah Chapter 1) which are NOT hardware-exclusive. Returns both the score
+ * and a human-readable reason for the breakdown UI.
  */
-function aspectCompatibilityScore(
-  dcpContainer?: string | null,
-  screenFormat?: string | null,
-): number {
-  const dcp = (dcpContainer ?? "").toLowerCase();
-  const screen = (screenFormat ?? "").toLowerCase();
+export function aspectCompatibilityScore(
+  dcpContainer: string,
+  screenFormat: string,
+  screenSpec: string | null,
+  isIMAXDcp: boolean, // true if the DCP format array includes "IMAX"
+  isVariableAspect: boolean,
+  movieAspectRatios: string[],
+): { score: number; reason: string } {
+  const dcp = (dcpContainer || "").toLowerCase();
+  const screen = (screenFormat || "").toLowerCase();
+  const spec = (screenSpec || "").toLowerCase();
 
-  // Unknown / standard screen → neutral.
-  if (!screen || screen.includes("standard")) return 0.6;
-
-  // IMAX containers (detected by the "imax" token, not a bare ratio, so a
-  // "Flat(1.90:1)" digital container isn't mistaken for IMAX).
-  if (dcp.includes("imax")) {
-    if (dcp.includes("1.43") && screen.includes("70mm")) return 1;
-    if (dcp.includes("1.90") && screen.includes("imax") && !screen.includes("70mm"))
-      return 1;
-    if (screen.includes("imax")) return 0.9; // general IMAX match
-    return 0.4; // IMAX DCP on non-IMAX screen (normally gated out upstream)
+  // ── IMAX DCP EXCLUSIVITY ──
+  // An IMAX-branded DCP must play on IMAX hardware (also gated upstream).
+  if (isIMAXDcp && !screen.includes("imax")) {
+    return { score: 0, reason: "IMAX DCP requires IMAX projection system" };
   }
 
-  const dcpFlat = dcp.includes("flat") || dcp.includes("1.85");
-  const dcpScope =
-    dcp.includes("scope") ||
-    dcp.includes("2.39") ||
-    dcp.includes("2.40") ||
-    dcp.includes("2.76");
-  const screenFlat = screen.includes("flat");
-  const screenScope = screen.includes("scope");
+  // ── VARIABLE ASPECT RATIO MOVIES ──
+  // Titles that switch ratios mid-film: weighted 70% primary / 30% secondary.
+  if (isVariableAspect && movieAspectRatios.length >= 2) {
+    const primary = movieAspectRatios[0]?.toLowerCase() || "";
+    const secondary = movieAspectRatios[1]?.toLowerCase() || "";
 
-  if (dcpFlat && screenFlat) return 1;
-  if (dcpScope && screenScope) return 1;
-  if ((dcpFlat && screenScope) || (dcpScope && screenFlat)) return 0.5; // mismatch
-  return 0.6; // neutral (PLF / other screen classes)
+    const primaryScore = calculateSingleAspectScore(primary, screen, spec, isIMAXDcp);
+    const secondaryScore = calculateSingleAspectScore(secondary, screen, spec, isIMAXDcp);
+
+    const weighted = primaryScore.score * 0.7 + secondaryScore.score * 0.3;
+
+    return {
+      score: weighted,
+      reason: `Variable aspect: ${primaryScore.reason} (70%) + ${secondaryScore.reason} (30%)`,
+    };
+  }
+
+  // ── SINGLE ASPECT RATIO ──
+  return calculateSingleAspectScore(dcp, screen, spec, isIMAXDcp);
+}
+
+function calculateSingleAspectScore(
+  dcpContainer: string,
+  screenFormat: string,
+  screenSpec: string | null,
+  isIMAXDcp: boolean,
+): { score: number; reason: string } {
+  const dcp = dcpContainer.toLowerCase();
+  const screen = screenFormat.toLowerCase();
+  const spec = (screenSpec || "").toLowerCase();
+
+  // ── IMAX 1.43:1 (70mm film aperture) ──
+  if (dcp.includes("1.43") || dcp.includes("imax film")) {
+    if (screen.includes("imax 70mm") || spec.includes("70mm"))
+      return { score: 1.0, reason: "IMAX 70mm film aperture — full frame" };
+    if (screen.includes("imax"))
+      return { score: 0.6, reason: "IMAX 1.43 DCP cropped to 1.90 digital" };
+    return { score: 0.1, reason: "Severe cropping on non-IMAX screen" };
+  }
+
+  // ── 1.90:1 (IMAX digital OR a tall non-IMAX ratio) ──
+  if (dcp.includes("1.90") || dcp.includes("imax digital")) {
+    if (isIMAXDcp) {
+      // IMAX-branded 1.90:1 — IMAX screen preferred.
+      if (screen.includes("imax"))
+        return { score: 1.0, reason: "IMAX digital on IMAX screen" };
+      if (screen.includes("flat"))
+        return { score: 0.75, reason: "Minor letterboxing on Flat screen" };
+      if (screen.includes("scope"))
+        return { score: 0.45, reason: "Significant pillarboxing on Scope screen" };
+      return { score: 0.6, reason: "Standard screen" };
+    }
+    // NON-IMAX 1.90:1 (e.g. Lokah Chapter 1, Manjummel Boys) — just a tall
+    // Flat-adjacent ratio, not hardware-exclusive.
+    if (screen.includes("imax") && !screen.includes("70mm"))
+      return { score: 1.0, reason: "Perfect fit on IMAX digital screen" };
+    if (screen.includes("flat"))
+      return { score: 0.95, reason: "Near-perfect fit on Flat screen (1.90 vs 1.85)" };
+    if (screen.includes("scope"))
+      return { score: 0.5, reason: "Pillarboxing on Scope screen" };
+    return { score: 0.7, reason: "Standard screen" };
+  }
+
+  // ── Flat 1.85:1 ──
+  if (dcp.includes("1.85") || dcp.includes("flat")) {
+    if (screen.includes("flat"))
+      return { score: 1.0, reason: "Flat DCP on Flat screen — perfect fit" };
+    if (screen.includes("scope"))
+      return { score: 0.5, reason: "Pillarboxing on Scope screen (22% image loss)" };
+    if (screen.includes("imax") && !screen.includes("70mm"))
+      return { score: 0.75, reason: "Minor letterboxing on IMAX digital" };
+    return { score: 0.6, reason: "Standard screen" };
+  }
+
+  // ── Scope 2.39:1 ──
+  if (dcp.includes("2.39") || dcp.includes("2.40") || dcp.includes("scope")) {
+    if (screen.includes("scope"))
+      return { score: 1.0, reason: "Scope DCP on Scope screen — perfect fit" };
+    if (screen.includes("flat"))
+      return { score: 0.5, reason: "Letterboxing on Flat screen (25% image loss)" };
+    if (screen.includes("imax") && !screen.includes("70mm"))
+      return { score: 0.65, reason: "Moderate letterboxing on IMAX digital" };
+    return { score: 0.6, reason: "Standard screen" };
+  }
+
+  // ── 70mm / 2.20:1 ──
+  if (dcp.includes("2.20") || dcp.includes("70mm")) {
+    if (screen.includes("70mm") || spec.includes("70mm"))
+      return { score: 1.0, reason: "70mm on 70mm screen" };
+    if (screen.includes("scope"))
+      return { score: 0.85, reason: "Minor letterboxing on Scope" };
+    if (screen.includes("flat"))
+      return { score: 0.6, reason: "Moderate letterboxing on Flat" };
+    return { score: 0.7, reason: "Standard screen" };
+  }
+
+  // ── Ultra-wide 2.76:1 (Cinerama / Ultra Panavision) ──
+  if (dcp.includes("2.76") || dcp.includes("ultra") || dcp.includes("cinerama")) {
+    if (screen.includes("scope"))
+      return { score: 0.85, reason: "Best standard fit — slight letterboxing" };
+    if (screen.includes("flat"))
+      return { score: 0.35, reason: "Severe letterboxing on Flat" };
+    if (screen.includes("imax"))
+      return { score: 0.4, reason: "Significant letterboxing" };
+    return { score: 0.6, reason: "Standard screen" };
+  }
+
+  return { score: 0.6, reason: "Unknown container match" };
 }
 
 function audioScore(mix?: string | null): number {
@@ -345,16 +469,26 @@ export function scoreScreen(
       accent: fmt >= 0.7 ? "premium" : "neutral",
     });
 
-    const asp = aspectCompatibilityScore(
+    const isIMAXDcp = dcp.format.some((f) => f.toLowerCase().includes("imax"));
+    const aspectResult = aspectCompatibilityScore(
       dcp.aspect_ratio_container,
       screen.screen_format,
+      screen.screen_spec,
+      isIMAXDcp,
+      movie.is_variable_aspect,
+      movie.aspect_ratio_variants,
     );
     push({
       label: "Aspect match",
-      detail: dcp.aspect_ratio_container,
-      value: asp,
+      detail: aspectResult.reason,
+      value: aspectResult.score,
       weight: WEIGHTS.dcpAspectCompatibility,
-      accent: asp >= 1 ? "premium" : "neutral",
+      accent:
+        aspectResult.score >= 0.9
+          ? "premium"
+          : aspectResult.score >= 0.6
+            ? "neutral"
+            : "imax",
     });
 
     const aud = audioScore(dcp.audio_mix);
@@ -522,7 +656,9 @@ function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
         case "Screen class":
           return `the ${b.detail} screen`;
         case "Aspect match":
-          return `a matched ${b.detail} container`;
+          // Detail is already a readable phrase, e.g. "Scope DCP on Scope
+          // screen — perfect fit".
+          return b.detail.toLowerCase().replace(/ — /g, ", ");
         case "Pixel density":
           return `sharp ${b.detail}`;
         case "Brightness estimate":
