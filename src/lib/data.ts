@@ -41,9 +41,22 @@ interface DbMovieRow {
   movie_name: string | null;
   runtime: number | null;
   resolution: string | null;
-  "aspect_ratio and container_format": string | null;
+  "aspect_ratio and container_format"?: string | null;
+  aspect_ratio_legacy?: string | null; // renamed by migration 0004
   audio_mix: string | null;
   formats: string | null;
+  // Canonical columns (synced by migration 0004; may be empty pre-cleanup)
+  title?: string | null;
+  tmdb_id?: number | null;
+  poster?: string | null;
+  backdrop?: string | null;
+  synopsis?: string | null;
+  release_date?: string | null;
+  duration?: number | null;
+  genre?: string[] | null;
+  format?: string[] | null;
+  is_now_playing?: boolean | null;
+  created_at?: string | null;
   // V2.0 columns (present after migration 0003; optional for older rows)
   dcp_variants?: MovieDcpVariants | null;
   aspect_ratio_primary?: string | null;
@@ -87,17 +100,19 @@ function splitFormats(s: string | null): string[] {
 function mapMovie(r: DbMovieRow): Movie {
   return {
     id: String(r.id),
-    tmdb_id: null,
-    title: r.movie_name ?? "Untitled",
-    poster: null,
-    backdrop: null,
-    synopsis: null,
-    release_date: null,
-    duration: r.runtime ?? null,
-    genre: [],
-    format: splitFormats(r.formats),
-    is_now_playing: true, // live schema has no flag — treat catalogue as current
-    created_at: EPOCH,
+    tmdb_id: r.tmdb_id ?? null,
+    // Canonical columns first, legacy columns as fallback (pre-0004 rows).
+    title: r.title || r.movie_name || "Untitled",
+    poster: r.poster ?? null,
+    backdrop: r.backdrop ?? null,
+    synopsis: r.synopsis ?? null,
+    release_date: r.release_date ?? null,
+    duration: r.duration ?? r.runtime ?? null,
+    genre: r.genre ?? [],
+    // `format` exists but is often `{}` while legacy `formats` holds the data.
+    format: r.format?.length ? r.format : splitFormats(r.formats),
+    is_now_playing: r.is_now_playing ?? true,
+    created_at: r.created_at ?? EPOCH,
     // V2.0
     dcp_variants: r.dcp_variants ?? null,
     aspect_ratio_primary: r.aspect_ratio_primary ?? null,
@@ -160,7 +175,11 @@ function syntheticDcp(r: DbMovieRow, screenId: string): Dcp {
     runtime: r.runtime ?? null,
     resolution: r.resolution ?? "2K 2048x1080",
     format: splitFormats(r.formats),
-    aspect_ratio_container: r["aspect_ratio and container_format"] ?? "Flat(1.85:1)",
+    aspect_ratio_container:
+      r.aspect_ratio_primary ??
+      r.aspect_ratio_legacy ??
+      r["aspect_ratio and container_format"] ??
+      "Flat(1.85:1)",
     audio_mix: r.audio_mix ?? "Dolby Surround 5.1",
     verified: false,
     source: "Theatre catalogue",
@@ -388,6 +407,26 @@ const VARIANT_AUDIO_LABELS: Record<string, string> = {
   standard: "Surround",
 };
 
+// "Scope 2.39:1" → "Scope(2.39:1)"; values already in Name(ratio) form pass through.
+function normalizeAspectRatio(ratio: string | null | undefined): string {
+  if (!ratio) return "Scope(2.39:1)";
+  if (ratio.includes("(")) return ratio;
+  return ratio.replace(/^([^(]+?)\s+([0-9.:]+)$/, "$1($2)");
+}
+
+// The container a NON-IMAX build ships in. For variable-aspect titles the
+// secondary ratio is normally the standard release (e.g. Dune 2's Scope 2.39),
+// so an IMAX-primary movie must NOT hand its IMAX ratio to a normal-venue DCP.
+function getStandardAspectRatio(movie: Movie): string {
+  if (movie.is_variable_aspect && movie.aspect_ratio_secondary) {
+    const sec = normalizeAspectRatio(movie.aspect_ratio_secondary);
+    if (!sec.toLowerCase().includes("imax")) return sec;
+  }
+  const primary = normalizeAspectRatio(movie.aspect_ratio_primary);
+  if (!primary.toLowerCase().includes("imax")) return primary;
+  return "Scope(2.39:1)";
+}
+
 function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
   const format: string[] = [];
   if (variant.is3D) format.push("3D");
@@ -398,14 +437,19 @@ function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
 
   const resolution = variant.resolution || "2K";
 
-  let aspectRatio = movie.aspect_ratio_primary || "Scope(2.39:1)";
-  if (
-    variant.venueType === "imax" &&
-    movie.aspect_ratio_variants?.includes("IMAX 1.43:1")
-  ) {
-    aspectRatio = "IMAX(1.43:1)";
-  } else if (variant.venueType === "imax") {
-    aspectRatio = "IMAX(1.90:1)";
+  // Aspect ratio follows the variant's venue, not blindly the movie's primary.
+  let aspectRatio: string;
+  if (variant.venueType === "imax") {
+    if (movie.aspect_ratio_variants?.includes("IMAX 1.43:1")) {
+      aspectRatio = "IMAX(1.43:1)";
+    } else if (movie.aspect_ratio_variants?.includes("IMAX 1.90:1")) {
+      aspectRatio = "IMAX(1.90:1)";
+    } else {
+      const primary = normalizeAspectRatio(movie.aspect_ratio_primary);
+      aspectRatio = primary.toLowerCase().includes("imax") ? primary : "IMAX(1.90:1)";
+    }
+  } else {
+    aspectRatio = getStandardAspectRatio(movie);
   }
 
   // Human-readable audio mix (e.g. "Dolby Atmos 7.1", "IMAX 12.0").
@@ -432,7 +476,15 @@ function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
 
 // --------------------------- DCPs / Master spec -----------------------------
 export async function getDcpsForMovie(movieId: string): Promise<Dcp[]> {
-  if (DEMO_MODE) return demo.dcps.filter((d) => d.movie_id === movieId);
+  if (DEMO_MODE) {
+    // Derive from the movie's distributor variant sheet (V2); the legacy
+    // hand-written demo.dcps array only backs movies without variants.
+    const movie = demo.movies.find((m) => m.id === movieId);
+    if (movie?.dcp_variants) {
+      return getDcpVariantsForMovie(movie).map((v) => convertVariantToDcp(v, movie));
+    }
+    return demo.dcps.filter((d) => d.movie_id === movieId);
+  }
   // Live schema has no dcps table; prefer the V2 distributor variant sheet,
   // falling back to the movie row's own spec columns.
   const row = await fetchMovieRow(movieId);
@@ -527,21 +579,25 @@ export async function getMovieRankings(movieId: string): Promise<RankedScreen[]>
 }
 
 async function getMovieRankingsDemo(movieId: string): Promise<RankedScreen[]> {
-  const movie = await getMovie(movieId);
+  const movie = demo.movies.find((m) => m.id === movieId);
   if (!movie) return [];
 
-  const dcps = await getDcpsForMovie(movieId);
-  const screenIds = Array.from(new Set(dcps.map((d) => d.screen_id)));
-  const screens = await getScreensByIds(screenIds);
-  const theatres = new Map(
-    demo.theatres.map((t) => [t.id, t] as const),
-  );
+  const theatres = new Map(demo.theatres.map((t) => [t.id, t] as const));
 
-  const dcpByScreen = new Map(dcps.map((d) => [d.screen_id, d]));
-  const candidates = screens.map((screen) => ({
-    screen,
-    dcp: dcpByScreen.get(screen.id) ?? null,
-  }));
+  // V2: rank EVERY demo screen by selecting the best distributor variant it
+  // can present — the same pipeline as live mode, so aspect compatibility and
+  // IMAX exclusivity are exercised in demo too. Screens with hand-written
+  // demo.dcps entries keep those (richer: verified flags, sources); the
+  // variant sheet covers the rest.
+  const demoDcpByScreen = new Map(
+    demo.dcps.filter((d) => d.movie_id === movieId).map((d) => [d.screen_id, d]),
+  );
+  const candidates = demo.screens.map((screen) => {
+    const handWritten = demoDcpByScreen.get(screen.id);
+    if (handWritten) return { screen, dcp: handWritten };
+    const variant = selectBestDcpVariant(movie, screen);
+    return { screen, dcp: variant ? convertVariantToDcp(variant, movie) : null };
+  });
 
   return rankScreens(movie, candidates)
     .map((r) => {
@@ -718,7 +774,25 @@ export async function getTheatreInteriorTemplates(): Promise<TheatreInteriorTemp
 
 export async function getMovieAvailableFormats(movieId: string): Promise<MovieAvailableFormat[]> {
   if (DEMO_MODE) {
-    return demo.availableFormats?.filter((f) => f.movie_id === movieId) ?? [];
+    const curated = demo.availableFormats?.filter((f) => f.movie_id === movieId) ?? [];
+    if (curated.length) return curated;
+    // Derive from the movie's distributor variant sheet.
+    const movie = demo.movies.find((m) => m.id === movieId);
+    if (!movie?.dcp_variants) return [];
+    return getDcpVariantsForMovie(movie).map((v, i) => ({
+      id: `fmt-${movieId}-${v.venueType}-${i}`,
+      movie_id: movieId,
+      format_name: v.venueType,
+      aspect_ratio: v.rawSpec.includes("1.85")
+        ? "1.85:1"
+        : v.rawSpec.includes("1.90")
+          ? "1.90:1"
+          : "2.39:1",
+      container_type: movie.aspect_ratio_primary || "Scope(2.39:1)",
+      is_available: true,
+      notes: v.rawSpec,
+      created_at: new Date().toISOString(),
+    }));
   }
   const supabase = createReadClient();
   const { data, error } = await supabase
