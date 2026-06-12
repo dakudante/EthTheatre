@@ -516,7 +516,12 @@ export const techTerms: TechTerm[] = [
   },
 ];
 
-// Format Visualizer demo data (populated later; empty keeps demo mode working).
+// ── Format Visualizer demo data ──────────────────────────────────────────────
+// `keyframes` / `interiorTemplates` stay empty until the Format Visualizer
+// feature ships with bundled imagery — the data layer handles empty results.
+// `availableFormats` is a curated OVERRIDE only: when empty, the data layer
+// derives demo entries from each movie's dcp_variants sheet automatically
+// (see getMovieAvailableFormats in data.ts), so demo mode is never blank.
 export const keyframes: MovieKeyframe[] = [];
 export const interiorTemplates: TheatreInteriorTemplate[] = [];
 export const availableFormats: MovieAvailableFormat[] = [];

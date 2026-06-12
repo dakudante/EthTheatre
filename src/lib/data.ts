@@ -407,6 +407,13 @@ const VARIANT_AUDIO_LABELS: Record<string, string> = {
   standard: "Surround",
 };
 
+// Pull a bare "W:1"-style ratio out of any spec/container text, e.g.
+// "Scope(2.39:1)" → "2.39:1", "4K 2.76:1 ATMO" → "2.76:1". Null when absent.
+function extractRatio(text: string | null | undefined): string | null {
+  const m = (text ?? "").match(/(\d\.\d{2})\s*:\s*1/);
+  return m ? `${m[1]}:1` : null;
+}
+
 // "Scope 2.39:1" → "Scope(2.39:1)"; values already in Name(ratio) form pass through.
 function normalizeAspectRatio(ratio: string | null | undefined): string {
   if (!ratio) return "Scope(2.39:1)";
@@ -585,18 +592,22 @@ async function getMovieRankingsDemo(movieId: string): Promise<RankedScreen[]> {
   const theatres = new Map(demo.theatres.map((t) => [t.id, t] as const));
 
   // V2: rank EVERY demo screen by selecting the best distributor variant it
-  // can present — the same pipeline as live mode, so aspect compatibility and
-  // IMAX exclusivity are exercised in demo too. Screens with hand-written
-  // demo.dcps entries keep those (richer: verified flags, sources); the
-  // variant sheet covers the rest.
+  // can present — the exact same pipeline as live mode, so aspect
+  // compatibility and IMAX exclusivity behave identically in demo. The legacy
+  // hand-written demo.dcps entries are only a fallback for movies without a
+  // variant sheet, never an override (they used different aspect ratios and
+  // made demo titles behave differently from live ones).
   const demoDcpByScreen = new Map(
     demo.dcps.filter((d) => d.movie_id === movieId).map((d) => [d.screen_id, d]),
   );
   const candidates = demo.screens.map((screen) => {
-    const handWritten = demoDcpByScreen.get(screen.id);
-    if (handWritten) return { screen, dcp: handWritten };
     const variant = selectBestDcpVariant(movie, screen);
-    return { screen, dcp: variant ? convertVariantToDcp(variant, movie) : null };
+    return {
+      screen,
+      dcp: variant
+        ? convertVariantToDcp(variant, movie)
+        : (demoDcpByScreen.get(screen.id) ?? null),
+    };
   });
 
   return rankScreens(movie, candidates)
@@ -683,14 +694,21 @@ export async function getScreenProgramme(
   screenId: string,
 ): Promise<ScreenProgramme[]> {
   if (!DEMO_MODE) return []; // no movie↔screen linkage in the live schema
-  const dcps = demo.dcps.filter((d) => d.screen_id === screenId);
   const [screen] = await getScreensByIds([screenId]);
   if (!screen) return [];
   const out: ScreenProgramme[] = [];
-  for (const d of dcps) {
-    const movie = await getMovie(d.movie_id);
-    if (!movie) continue;
-    out.push({ movie, dcp: d, showtimes: generateShowtimes(screen, movie) });
+  for (const movie of demo.movies.filter((m) => m.is_now_playing)) {
+    // Same variant pipeline as the rankings, so the screen page shows the same
+    // package the movie page ranks. demo.dcps is only a legacy fallback.
+    const variant = selectBestDcpVariant(movie, screen);
+    const dcp = variant
+      ? convertVariantToDcp(variant, movie)
+      : (demo.dcps.find((d) => d.screen_id === screenId && d.movie_id === movie.id) ?? null);
+    if (!dcp) continue;
+    // An IMAX-only build can't play on this screen — skip incompatible titles.
+    const dcpIsImax = dcp.format.some((f) => f.toLowerCase().includes("imax"));
+    if (dcpIsImax && !screen.screen_format.toLowerCase().includes("imax")) continue;
+    out.push({ movie, dcp, showtimes: generateShowtimes(screen, movie) });
   }
   return out;
 }
@@ -776,23 +794,24 @@ export async function getMovieAvailableFormats(movieId: string): Promise<MovieAv
   if (DEMO_MODE) {
     const curated = demo.availableFormats?.filter((f) => f.movie_id === movieId) ?? [];
     if (curated.length) return curated;
-    // Derive from the movie's distributor variant sheet.
+    // Derive from the movie's distributor variant sheet. The aspect ratio per
+    // entry comes from the spec text when present, otherwise from the
+    // variant's resolved container (handles 2.76:1, 2.20:1, 1.43:1 titles).
     const movie = demo.movies.find((m) => m.id === movieId);
     if (!movie?.dcp_variants) return [];
-    return getDcpVariantsForMovie(movie).map((v, i) => ({
-      id: `fmt-${movieId}-${v.venueType}-${i}`,
-      movie_id: movieId,
-      format_name: v.venueType,
-      aspect_ratio: v.rawSpec.includes("1.85")
-        ? "1.85:1"
-        : v.rawSpec.includes("1.90")
-          ? "1.90:1"
-          : "2.39:1",
-      container_type: movie.aspect_ratio_primary || "Scope(2.39:1)",
-      is_available: true,
-      notes: v.rawSpec,
-      created_at: new Date().toISOString(),
-    }));
+    return getDcpVariantsForMovie(movie).map((v, i) => {
+      const container = convertVariantToDcp(v, movie).aspect_ratio_container;
+      return {
+        id: `fmt-${movieId}-${v.venueType}-${i}`,
+        movie_id: movieId,
+        format_name: v.venueType,
+        aspect_ratio: extractRatio(v.rawSpec) ?? extractRatio(container) ?? "2.39:1",
+        container_type: container,
+        is_available: true,
+        notes: v.rawSpec,
+        created_at: new Date().toISOString(),
+      };
+    });
   }
   const supabase = createReadClient();
   const { data, error } = await supabase
