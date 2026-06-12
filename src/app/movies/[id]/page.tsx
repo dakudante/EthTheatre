@@ -1,11 +1,11 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { CalendarDays, Clock, Film, Info, Trophy } from "lucide-react";
-import { getMovie, getMovieMasterDcp, getMovieRankings } from "@/lib/data";
+import { getMovie, getMovieMasterDcp, getMovieRankedVariants } from "@/lib/data";
 import { Poster, Backdrop } from "@/components/poster";
 import { FormatBadge } from "@/components/format-badge";
-import { RankedScreenCard } from "@/components/ranked-screen-card";
 import { MasterDcpSpec } from "@/components/master-dcp-spec";
+import { VariantRankings } from "@/components/variant-rankings";
 import { Reveal } from "@/components/reveal";
 import { formatRuntime, formatDate } from "@/lib/utils";
 
@@ -30,11 +30,12 @@ export default async function MoviePage({
   const movie = await getMovie(params.id);
   if (!movie) notFound();
 
-  const [rankings, masterDcp] = await Promise.all([
-    getMovieRankings(movie.id),
+  const [rankedVariants, masterDcp] = await Promise.all([
+    getMovieRankedVariants(movie.id),
     getMovieMasterDcp(movie.id),
   ]);
-  const best = rankings[0];
+  const variants = rankedVariants?.variants ?? [];
+  const best = variants[0]?.rankings[0];
 
   return (
     <div className="pb-12">
@@ -88,12 +89,16 @@ export default async function MoviePage({
         </div>
       </section>
 
-      {/* Master DCP spec (movie-level) */}
-      <section className="container mt-10">
-        <Reveal>
-          <MasterDcpSpec movie={movie} dcp={masterDcp} />
-        </Reveal>
-      </section>
+      {/* Master DCP spec — only when a single variant exists. Multi-variant
+          titles list every build in the "Available DCP formats" chips below
+          (one master spec was the root-cause UI confusion). */}
+      {variants.length <= 1 && (
+        <section className="container mt-10">
+          <Reveal>
+            <MasterDcpSpec movie={movie} dcp={variants[0]?.dcp ?? masterDcp} />
+          </Reveal>
+        </section>
+      )}
 
       {/* Rankings */}
       <section className="container mt-12">
@@ -111,7 +116,7 @@ export default async function MoviePage({
           </div>
         </div>
 
-        {rankings.length === 0 ? (
+        {variants.length === 0 ? (
           <div className="rounded-2xl glass p-8 text-center text-muted-foreground">
             <Info className="mx-auto mb-3 size-6" />
             No screens currently have a confirmed package for this title.
@@ -124,7 +129,8 @@ export default async function MoviePage({
                   <span className="font-medium text-foreground">
                     {best.theatre.city}
                   </span>
-                  ’s {best.screen.name} tops the list with a score of{" "}
+                  ’s {best.screen.name} tops the {variants[0].label} list with a
+                  score of{" "}
                   <span className="font-semibold text-primary">
                     {best.score}
                   </span>
@@ -132,13 +138,7 @@ export default async function MoviePage({
                 </div>
               </Reveal>
             )}
-            <div className="space-y-5">
-              {rankings.map((r, i) => (
-                <Reveal key={r.screen.id} delay={i * 0.05}>
-                  <RankedScreenCard ranked={r} />
-                </Reveal>
-              ))}
-            </div>
+            <VariantRankings variants={variants} />
           </>
         )}
       </section>

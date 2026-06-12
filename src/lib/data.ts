@@ -2,7 +2,12 @@ import "server-only";
 
 import { isSupabaseConfigured } from "./supabase/server";
 import { createReadClient } from "./supabase/admin";
-import { rankScreens } from "./ranking";
+import {
+  isCompatible,
+  rankByVariants,
+  rankScreens,
+  rankScreensDeduped,
+} from "./ranking";
 import * as demo from "./sample-data";
 import type {
   Dcp,
@@ -467,7 +472,9 @@ function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
   }
 
   return {
-    id: `variant-${movie.id}-${variant.venueType}`,
+    // Unique per spec string — one venue can ship several builds (e.g. IMAX
+    // 5CH and 12CH) and grouping by id must keep them distinct.
+    id: `variant-${movie.id}-${variant.venueType}-${variant.rawSpec.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
     screen_id: "",
     movie_id: movie.id,
     runtime: movie.duration || 0,
@@ -533,98 +540,172 @@ async function getScreensByIds(ids: string[]): Promise<Screen[]> {
   return ((data as DbScreenRow[]) ?? []).map(mapScreen);
 }
 
-export async function getMovieRankings(movieId: string): Promise<RankedScreen[]> {
-  if (DEMO_MODE) return getMovieRankingsDemo(movieId);
-
-  // Live: rank ALL screens for this title using a synthetic DCP built from the
-  // movie row (resolution / aspect / audio / format it ships in).
-  const row = await fetchMovieRow(movieId);
+/**
+ * Expand a movie into its full list of DCP variants (one Dcp per build).
+ * - V2 sheet present → one Dcp per parsed variant spec.
+ * - Legacy IMAX title without a sheet → an IMAX variant AND a standard
+ *   variant, so non-IMAX screens still rank under the standard build.
+ * - Otherwise → single synthetic DCP from the movie row / demo array.
+ */
+function buildDcpVariants(movie: Movie, row: DbMovieRow | null): Dcp[] {
+  const parsed = getDcpVariantsForMovie(movie);
+  if (parsed.length > 0) {
+    return parsed.map((v) => convertVariantToDcp(v, movie));
+  }
   if (!row) return [];
-  const movie = mapMovie(row);
-
-  const supabase = createReadClient();
-  const [{ data: screenRows }, { data: theatreRows }] = await Promise.all([
-    supabase.from("screens").select("*"),
-    supabase.from("theatres").select("*"),
-  ]);
-
-  const screens = ((screenRows as DbScreenRow[]) ?? []).map(mapScreen);
-  const theatres = new Map(
-    ((theatreRows as DbTheatreRow[]) ?? []).map((t) => [
-      String(t.id),
-      mapTheatre(t),
-    ]),
-  );
-
-  // V2.0: when the movie carries a distributor variant sheet, pick the best
-  // build each screen can present; otherwise fall back to the legacy synthetic
-  // DCP derived from the movie row's own spec columns.
-  const candidates = screens.map((screen) => {
-    const variant = selectBestDcpVariant(movie, screen);
-    return {
-      screen,
-      dcp: variant ? convertVariantToDcp(variant, movie) : syntheticDcp(row, screen.id),
+  const base = syntheticDcp(row, "global");
+  const isImaxMovie = base.format.some((f) => f.toLowerCase().includes("imax"));
+  if (isImaxMovie) {
+    const imaxVariant: Dcp = { ...base, id: `dcp-${row.id}-imax` };
+    const standardVariant: Dcp = {
+      ...base,
+      id: `dcp-${row.id}-std`,
+      format: base.format.filter((f) => !f.toLowerCase().includes("imax")),
+      aspect_ratio_container: base.aspect_ratio_container.includes("1.90")
+        ? "Flat(1.85:1)" // best guess for the standard container
+        : base.aspect_ratio_container,
     };
-  });
+    return [imaxVariant, standardVariant];
+  }
+  return [base];
+}
 
-  return rankScreens(movie, candidates)
+interface MovieCandidates {
+  movie: Movie;
+  candidates: { screen: Screen; dcp: Dcp | null }[];
+  theatres: Map<string, Theatre>;
+}
+
+/**
+ * Shared candidate construction for ranking: every (screen × DCP variant)
+ * pair the screen can physically present. A screen may appear once per
+ * compatible variant — consumers either dedupe (flat list) or group by
+ * variant (tabbed UI).
+ */
+async function buildMovieCandidates(
+  movieId: string,
+  city?: string,
+): Promise<MovieCandidates | null> {
+  let movie: Movie | null;
+  let row: DbMovieRow | null = null;
+  let screens: Screen[];
+  let theatres: Map<string, Theatre>;
+
+  if (DEMO_MODE) {
+    movie = demo.movies.find((m) => m.id === movieId) ?? null;
+    if (!movie) return null;
+    screens = demo.screens;
+    theatres = new Map(demo.theatres.map((t) => [t.id, t] as const));
+  } else {
+    row = await fetchMovieRow(movieId);
+    if (!row) return null;
+    movie = mapMovie(row);
+    const supabase = createReadClient();
+    const [{ data: screenRows }, { data: theatreRows }] = await Promise.all([
+      supabase.from("screens").select("*"),
+      supabase.from("theatres").select("*"),
+    ]);
+    screens = ((screenRows as DbScreenRow[]) ?? []).map(mapScreen);
+    theatres = new Map(
+      ((theatreRows as DbTheatreRow[]) ?? []).map((t) => [
+        String(t.id),
+        mapTheatre(t),
+      ]),
+    );
+  }
+
+  if (city) {
+    const c = city.toLowerCase();
+    const matching = new Set(
+      Array.from(theatres.values())
+        .filter((t) => t.city.toLowerCase().includes(c))
+        .map((t) => t.id),
+    );
+    screens = screens.filter((s) => matching.has(s.theatre_id));
+  }
+
+  const variants = buildDcpVariants(movie, row);
+
+  let candidates: { screen: Screen; dcp: Dcp | null }[];
+  if (variants.length > 0) {
+    candidates = screens.flatMap((screen) =>
+      variants
+        .filter((dcp) => isCompatible(screen, dcp))
+        .map((dcp) => ({ screen, dcp })),
+    );
+  } else {
+    // Demo movie without a variant sheet: legacy hand-written demo.dcps.
+    const demoDcpByScreen = new Map(
+      demo.dcps.filter((d) => d.movie_id === movieId).map((d) => [d.screen_id, d]),
+    );
+    candidates = screens.map((screen) => ({
+      screen,
+      dcp: demoDcpByScreen.get(screen.id) ?? null,
+    }));
+  }
+
+  return { movie, candidates, theatres };
+}
+
+function toRankedScreen(
+  r: ReturnType<typeof rankScreens>[number],
+  movie: Movie,
+  theatres: Map<string, Theatre>,
+): RankedScreen | null {
+  const theatre = theatres.get(r.screen.theatre_id);
+  if (!theatre) return null;
+  return {
+    rank: r.rank,
+    score: r.score,
+    reason: r.reason,
+    screen: r.screen,
+    theatre,
+    dcp: r.dcp,
+    showtimes: generateShowtimes(r.screen, movie),
+  };
+}
+
+export async function getMovieRankings(movieId: string): Promise<RankedScreen[]> {
+  const built = await buildMovieCandidates(movieId);
+  if (!built) return [];
+  const { movie, candidates, theatres } = built;
+
+  // A screen can appear once per compatible variant — keep its best assignment.
+  return rankScreensDeduped(movie, candidates)
     .slice(0, 12)
-    .map((r) => {
-      const theatre = theatres.get(r.screen.theatre_id);
-      if (!theatre) return null;
-      return {
-        rank: r.rank,
-        score: r.score,
-        reason: r.reason,
-        screen: r.screen,
-        theatre,
-        dcp: r.dcp,
-        showtimes: generateShowtimes(r.screen, movie),
-      } satisfies RankedScreen;
-    })
+    .map((r) => toRankedScreen(r, movie, theatres))
     .filter((x): x is RankedScreen => x !== null);
 }
 
-async function getMovieRankingsDemo(movieId: string): Promise<RankedScreen[]> {
-  const movie = demo.movies.find((m) => m.id === movieId);
-  if (!movie) return [];
+export interface RankedVariantGroup {
+  dcp: Dcp;
+  label: string;
+  tier: number;
+  rankings: RankedScreen[];
+}
 
-  const theatres = new Map(demo.theatres.map((t) => [t.id, t] as const));
+/** Per-variant ranked sections (best variant first) for the tabbed movie UI. */
+export async function getMovieRankedVariants(
+  movieId: string,
+  city?: string,
+): Promise<{ movie: Movie; variants: RankedVariantGroup[] } | null> {
+  const built = await buildMovieCandidates(movieId, city);
+  if (!built) return null;
+  const { movie, candidates, theatres } = built;
 
-  // V2: rank EVERY demo screen by selecting the best distributor variant it
-  // can present — the exact same pipeline as live mode, so aspect
-  // compatibility and IMAX exclusivity behave identically in demo. The legacy
-  // hand-written demo.dcps entries are only a fallback for movies without a
-  // variant sheet, never an override (they used different aspect ratios and
-  // made demo titles behave differently from live ones).
-  const demoDcpByScreen = new Map(
-    demo.dcps.filter((d) => d.movie_id === movieId).map((d) => [d.screen_id, d]),
-  );
-  const candidates = demo.screens.map((screen) => {
-    const variant = selectBestDcpVariant(movie, screen);
-    return {
-      screen,
-      dcp: variant
-        ? convertVariantToDcp(variant, movie)
-        : (demoDcpByScreen.get(screen.id) ?? null),
-    };
-  });
+  const variants = rankByVariants(movie, candidates)
+    .map(({ dcp, label, tier, ranked }) => ({
+      dcp,
+      label,
+      tier,
+      rankings: ranked
+        .slice(0, 12)
+        .map((r) => toRankedScreen(r, movie, theatres))
+        .filter((x): x is RankedScreen => x !== null),
+    }))
+    .filter((g) => g.rankings.length > 0);
 
-  return rankScreens(movie, candidates)
-    .map((r) => {
-      const theatre = theatres.get(r.screen.theatre_id);
-      if (!theatre) return null;
-      return {
-        rank: r.rank,
-        score: r.score,
-        reason: r.reason,
-        screen: r.screen,
-        theatre,
-        dcp: r.dcp,
-        showtimes: generateShowtimes(r.screen, movie),
-      } satisfies RankedScreen;
-    })
-    .filter((x): x is RankedScreen => x !== null);
+  return { movie, variants };
 }
 
 // --------------------------- Theatres ---------------------------------------

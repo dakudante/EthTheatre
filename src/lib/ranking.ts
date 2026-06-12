@@ -377,7 +377,10 @@ function screenClassScore(format?: string | null): {
     return { value: 0.82, accent: "epiq" };
   if (v.includes("4dx") || v.includes("luxe") || v.includes("premium"))
     return { value: 0.7, accent: "premium" };
-  if (v.includes("scope")) return { value: 0.6, accent: "neutral" };
+  // Scope and Flat are both plain containers — neither class is inherently
+  // better; fit with the DCP is judged by the aspect-match factor instead.
+  if (v.includes("scope") || v.includes("flat"))
+    return { value: 0.6, accent: "neutral" };
   return { value: 0.5, accent: "neutral" };
 }
 
@@ -449,6 +452,14 @@ export function scoreScreen(
     else if (nitsEstimate >= 25) brightnessEstimate = 0.55;
     else brightnessEstimate = 0.35;
   }
+
+  // ── Aspect-fit multiplier: gate hardware bonuses on picture shape ──
+  // Brightness/sharpness of the WRONG frame shape is not "better": a top-tier
+  // projector on a pillarboxed screen must not out-bonus a correctly fitted
+  // average screen. 1.0 fit → full bonus, 0.5 fit → half, floored at 0.3
+  // (a mismatched screen is still a functioning room). Stays 1 when no DCP.
+  let aspectFitMultiplier = 1;
+
   // ---- DCP dimension ----
   if (dcp) {
     const res = resolutionScore(dcp.resolution);
@@ -490,6 +501,7 @@ export function scoreScreen(
             ? "neutral"
             : "imax",
     });
+    aspectFitMultiplier = Math.max(0.3, aspectResult.score);
 
     const aud = audioScore(dcp.audio_mix);
     push({
@@ -560,11 +572,13 @@ export function scoreScreen(
     weight: WEIGHTS.hwScreenSize,
   });
   // ── Enhanced hardware bonuses (only if data available) ──
+  // All four are gated by aspectFitMultiplier: premium hardware showing the
+  // wrong frame shape must not out-bonus a correctly fitted average screen.
   if (projectorSpecs) {
     push({
       label: "Projector model",
       detail: `${screen.projector_brand} ${screen.projector_model}`,
-      value: projectorSpecBonus,
+      value: projectorSpecBonus * aspectFitMultiplier,
       weight: 0.03,
       accent: projectorSpecBonus >= 0.9 ? "premium" : "neutral",
     });
@@ -574,7 +588,7 @@ export function scoreScreen(
     push({
       label: "Screen material",
       detail: `${screen.screen_brand} (${screenSpecs.material}, gain ${screenSpecs.gain})`,
-      value: screenGainMatch,
+      value: screenGainMatch * aspectFitMultiplier,
       weight: 0.03,
       accent: screenGainMatch >= 0.9 ? "premium" : "neutral",
     });
@@ -584,7 +598,7 @@ export function scoreScreen(
     push({
       label: "Pixel density",
       detail: `${projectorSpecs.resolution} on ${screenDims.widthFt}ft screen`,
-      value: pixelDensityAdequacy,
+      value: pixelDensityAdequacy * aspectFitMultiplier,
       weight: 0.04,
       accent: pixelDensityAdequacy >= 0.9 ? "premium" : "neutral",
     });
@@ -594,7 +608,7 @@ export function scoreScreen(
     push({
       label: "Brightness estimate",
       detail: `${projectorSpecs.estimatedLumens}lm × ${screenSpecs.gain} gain / ${Math.round(screenDims.areaSqFt)}sqft`,
-      value: brightnessEstimate,
+      value: brightnessEstimate * aspectFitMultiplier,
       weight: 0.03,
       accent: brightnessEstimate >= 0.9 ? "premium" : "neutral",
     });
@@ -723,4 +737,101 @@ export function rankScreens(
       return scoreDiff;
     })
     .map((c, i) => ({ ...c, rank: i + 1 }));
+}
+
+/**
+ * Like rankScreens, but for candidate lists where a screen may appear once per
+ * compatible DCP variant: keeps only each screen's best-scoring assignment,
+ * then re-ranks 1..N.
+ */
+export function rankScreensDeduped(
+  movie: Movie,
+  candidates: { screen: Screen; dcp: Dcp | null }[],
+) {
+  const all = rankScreens(movie, candidates);
+  const best = new Map<string, (typeof all)[number]>();
+  for (const result of all) {
+    const existing = best.get(result.screen.id);
+    if (!existing || result.score > existing.score) {
+      best.set(result.screen.id, result);
+    }
+  }
+  return Array.from(best.values())
+    .sort((a, b) => b.score - a.score)
+    .map((c, i) => ({ ...c, rank: i + 1 }));
+}
+
+// ── DCP variant grouping (BMS-style per-presentation sections) ──────────────
+
+/** Canonical label for a DCP variant used as a tab/section heading. */
+export function dcpVariantLabel(dcp: Dcp): string {
+  const formats = dcp.format.map((f) => f.toLowerCase());
+  const isImax = formats.some((f) => f.includes("imax"));
+  const is3D = formats.some((f) => f === "3d");
+  const isDolbyVision = formats.some(
+    (f) => f.includes("dolby vision") || f.includes("hdr"),
+  );
+  const res = (dcp.resolution ?? "").toUpperCase().includes("4K") ? "4K" : "2K";
+  const audio = dcp.audio_mix ?? "";
+  if (isImax && is3D) return `IMAX 3D · ${res} · ${audio}`;
+  if (isImax) return `IMAX 2D · ${res} · ${audio}`;
+  if (is3D) return `3D · ${res} · ${audio}`;
+  if (isDolbyVision) return `Dolby Vision 2D · ${res} · ${audio}`;
+  return `Standard 2D · ${res} · ${audio}`;
+}
+
+/** Priority tier for sorting variant tabs (lower = shown first / best). */
+export function dcpVariantTier(dcp: Dcp): number {
+  const formats = dcp.format.map((f) => f.toLowerCase());
+  const isImax = formats.some((f) => f.includes("imax"));
+  const is3D = formats.some((f) => f === "3d");
+  const res4K = (dcp.resolution ?? "").toLowerCase().includes("4k");
+  const audio = (dcp.audio_mix ?? "").toLowerCase();
+  const hasAtmos = audio.includes("atmos");
+  const hasDtsX = audio.includes("dts") && audio.includes("x");
+  const hasImax12ch = audio.includes("imax") && audio.includes("12");
+
+  if (isImax && !is3D && hasImax12ch) return 1; // IMAX 2D 12-channel (best)
+  if (isImax && !is3D) return 2; // IMAX 2D
+  if (isImax && is3D) return 3; // IMAX 3D
+  if (!is3D && res4K && hasAtmos) return 4; // 4K Laser Atmos
+  if (!is3D && res4K && hasDtsX) return 5; // 4K DTS-X
+  if (!is3D && res4K) return 6; // 4K 7.1 / 5.1
+  if (!is3D && hasAtmos) return 7; // 2K Atmos
+  if (!is3D && hasDtsX) return 8; // 2K DTS-X
+  if (!is3D) return 9; // 2K standard
+  if (is3D && res4K && hasAtmos) return 10; // 4K 3D Atmos
+  if (is3D && res4K) return 11; // 4K 3D
+  if (is3D) return 12; // 2K 3D
+  return 99;
+}
+
+/** Group and rank screens by DCP variant, sorted best-variant-first. */
+export function rankByVariants(
+  movie: Movie,
+  candidates: { screen: Screen; dcp: Dcp | null }[],
+): {
+  dcp: Dcp;
+  label: string;
+  tier: number;
+  ranked: ReturnType<typeof rankScreens>;
+}[] {
+  const groups = new Map<
+    string,
+    { dcp: Dcp; screens: { screen: Screen; dcp: Dcp }[] }
+  >();
+  for (const c of candidates) {
+    if (!c.dcp) continue;
+    const key = c.dcp.id;
+    if (!groups.has(key)) groups.set(key, { dcp: c.dcp, screens: [] });
+    groups.get(key)!.screens.push({ screen: c.screen, dcp: c.dcp });
+  }
+  return Array.from(groups.values())
+    .map(({ dcp, screens }) => ({
+      dcp,
+      label: dcpVariantLabel(dcp),
+      tier: dcpVariantTier(dcp),
+      ranked: rankScreens(movie, screens),
+    }))
+    .sort((a, b) => a.tier - b.tier);
 }
