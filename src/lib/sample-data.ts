@@ -1,5 +1,4 @@
 import type {
-  Dcp,
   Movie,
   MovieAvailableFormat,
   MovieKeyframe,
@@ -335,51 +334,9 @@ export const movies: Movie[] = [
   },
 ];
 
-// DCP records — the screen-specific package each title plays in.
-function dcp(
-  id: string, screen_id: string, movie_id: string,
-  resolution: string, format: string[], aspect: string, audio: string,
-  verified: boolean, runtime: number, source = "Theatre confirmation",
-): Dcp {
-  return {
-    id, screen_id, movie_id, runtime, resolution, format,
-    aspect_ratio_container: aspect, audio_mix: audio, verified, source,
-    created_at: "2024-01-01T00:00:00Z",
-  };
-}
-
-export const dcps: Dcp[] = [
-  // Dune: Part Two
-  dcp("d1", "scr-a1", "mv-dune2", "4K 4096x2160", ["IMAX", "HDR"], "IMAX(1.90:1)", "IMAX 12 Channel", true, 166),
-  dcp("d2", "scr-b1", "mv-dune2", "4K 4096x2160", ["IMAX", "HDR"], "IMAX(1.43:1)", "IMAX 12 Channel", true, 166),
-  dcp("d3", "scr-a2", "mv-dune2", "4K 4096x2160", ["HDR", "Dolby Vision"], "Scope(2.39:1)", "Dolby Atmos", true, 166),
-  dcp("d4", "scr-c2", "mv-dune2", "4K 4096x2160", ["HDR"], "Scope(2.39:1)", "Dolby Atmos", true, 166),
-  dcp("d5", "scr-d1", "mv-dune2", "2K 2048x858", [], "Scope(2.39:1)", "Dolby Atmos", false, 166, "User report"),
-  // Oppenheimer
-  dcp("d6", "scr-b1", "mv-oppen", "4K 4096x2160", ["IMAX", "70mm"], "IMAX(1.43:1)", "IMAX 12 Channel", true, 180, "Studio spec sheet"),
-  dcp("d7", "scr-a1", "mv-oppen", "4K 4096x2160", ["IMAX"], "IMAX(1.90:1)", "IMAX 12 Channel", true, 180),
-  dcp("d8", "scr-c1", "mv-oppen", "4K 4096x2160", ["HDR"], "Flat(1.85:1)", "Dolby Atmos", true, 180),
-  dcp("d9", "scr-b3", "mv-oppen", "2K 2048x1080", [], "Flat(1.85:1)", "Dolby 5.1", false, 180),
-  // Interstellar
-  dcp("d10", "scr-b1", "mv-inter", "4K 4096x2160", ["IMAX 70mm", "70mm"], "IMAX(1.43:1)", "IMAX 12 Channel", true, 169, "Studio spec sheet"),
-  dcp("d11", "scr-a1", "mv-inter", "4K 4096x2160", ["IMAX"], "IMAX(1.90:1)", "IMAX 12 Channel", true, 169),
-  dcp("d12", "scr-b2", "mv-inter", "4K 4096x2160", ["HDR"], "Scope(2.39:1)", "Dolby Atmos", true, 169),
-  // Furiosa
-  dcp("d13", "scr-a2", "mv-furiosa", "4K 4096x2160", ["HDR", "Dolby Vision"], "Scope(2.39:1)", "Dolby Atmos", true, 148),
-  dcp("d14", "scr-c2", "mv-furiosa", "4K 4096x2160", ["HDR"], "Scope(2.39:1)", "Dolby Atmos", true, 148),
-  dcp("d15", "scr-b2", "mv-furiosa", "4K 4096x2160", ["HDR"], "Scope(2.39:1)", "Dolby Atmos", true, 148),
-  dcp("d16", "scr-d1", "mv-furiosa", "2K 2048x858", [], "Scope(2.39:1)", "Dolby Atmos", false, 148),
-  // Godzilla x Kong
-  dcp("d17", "scr-a1", "mv-godzilla", "4K 4096x2160", ["IMAX", "3D"], "IMAX(1.90:1)", "IMAX 12 Channel", true, 115),
-  dcp("d18", "scr-c3", "mv-godzilla", "4K 4096x2160", ["3D", "4DX"], "Scope(2.39:1)", "Dolby 7.1", true, 115),
-  dcp("d19", "scr-b2", "mv-godzilla", "4K 4096x2160", ["HDR", "3D"], "Scope(2.39:1)", "Dolby Atmos", true, 115),
-  dcp("d20", "scr-d2", "mv-godzilla", "2K 2048x1080", [], "Flat(1.85:1)", "Dolby 5.1", false, 115),
-  // The Wild Robot
-  dcp("d21", "scr-c1", "mv-wildrobot", "4K 4096x2160", ["HDR", "Dolby Vision"], "Scope(2.39:1)", "Dolby Atmos", true, 102),
-  dcp("d22", "scr-b2", "mv-wildrobot", "4K 4096x2160", ["HDR"], "Scope(2.39:1)", "Dolby Atmos", true, 102),
-  dcp("d23", "scr-d1", "mv-wildrobot", "4K 4096x2160", ["HDR"], "Scope(2.39:1)", "Dolby Atmos", true, 102),
-  dcp("d24", "scr-d2", "mv-wildrobot", "2K 2048x1080", [], "Flat(1.85:1)", "Dolby 5.1", false, 102),
-];
+// NOTE: Per-screen DCP records were removed in V2.0 — each movie's
+// `dcp_variants` distributor sheet is now the sole source of DCP data in both
+// demo and live mode (see convertVariantToDcp / selectBestDcpVariant in data.ts).
 
 export const techTerms: TechTerm[] = [
   {

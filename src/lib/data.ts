@@ -3,6 +3,7 @@ import "server-only";
 import { isSupabaseConfigured } from "./supabase/server";
 import { createReadClient } from "./supabase/admin";
 import {
+  dcpVariantTier,
   isCompatible,
   rankByVariants,
   rankScreens,
@@ -396,10 +397,11 @@ export function selectBestDcpVariant(
     if (normal.length > 0) compatible = normal;
   }
 
-  compatible = [...compatible].sort((a, b) => {
-    const resOrder: Record<string, number> = { "8K": 4, "4K": 3, "2K": 2 };
-    return (resOrder[b.resolution ?? ""] || 0) - (resOrder[a.resolution ?? ""] || 0);
-  });
+  compatible = [...compatible].sort(
+    (a, b) =>
+      dcpVariantTier(convertVariantToDcp(a, movie)) -
+      dcpVariantTier(convertVariantToDcp(b, movie)),
+  );
 
   return compatible[0] ?? null;
 }
@@ -482,7 +484,8 @@ function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
     format,
     aspect_ratio_container: aspectRatio,
     audio_mix: audioMix,
-    verified: false,
+    // Variants come from an actual distributor spec sheet — authoritative data.
+    verified: true,
     source: `distributor_sheet:${variant.venueType}`,
     created_at: new Date().toISOString(),
   };
@@ -490,14 +493,11 @@ function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
 
 // --------------------------- DCPs / Master spec -----------------------------
 export async function getDcpsForMovie(movieId: string): Promise<Dcp[]> {
+  // The V2 dcp_variants sheet is the sole source of DCP data in both modes.
   if (DEMO_MODE) {
-    // Derive from the movie's distributor variant sheet (V2); the legacy
-    // hand-written demo.dcps array only backs movies without variants.
     const movie = demo.movies.find((m) => m.id === movieId);
-    if (movie?.dcp_variants) {
-      return getDcpVariantsForMovie(movie).map((v) => convertVariantToDcp(v, movie));
-    }
-    return demo.dcps.filter((d) => d.movie_id === movieId);
+    if (!movie) return [];
+    return getDcpVariantsForMovie(movie).map((v) => convertVariantToDcp(v, movie));
   }
   // Live schema has no dcps table; prefer the V2 distributor variant sheet,
   // falling back to the movie row's own spec columns.
@@ -624,25 +624,15 @@ async function buildMovieCandidates(
     screens = screens.filter((s) => matching.has(s.theatre_id));
   }
 
+  // Every screen × DCP variant it can physically present. buildDcpVariants
+  // always yields ≥1 variant (V2 sheet in demo, synthetic fallback in live),
+  // so the dcp_variants sheet is the sole DCP source.
   const variants = buildDcpVariants(movie, row);
-
-  let candidates: { screen: Screen; dcp: Dcp | null }[];
-  if (variants.length > 0) {
-    candidates = screens.flatMap((screen) =>
-      variants
-        .filter((dcp) => isCompatible(screen, dcp))
-        .map((dcp) => ({ screen, dcp })),
-    );
-  } else {
-    // Demo movie without a variant sheet: legacy hand-written demo.dcps.
-    const demoDcpByScreen = new Map(
-      demo.dcps.filter((d) => d.movie_id === movieId).map((d) => [d.screen_id, d]),
-    );
-    candidates = screens.map((screen) => ({
-      screen,
-      dcp: demoDcpByScreen.get(screen.id) ?? null,
-    }));
-  }
+  const candidates = screens.flatMap((screen) =>
+    variants
+      .filter((dcp) => isCompatible(screen, dcp))
+      .map((dcp) => ({ screen, dcp })),
+  );
 
   return { movie, candidates, theatres };
 }
@@ -780,12 +770,10 @@ export async function getScreenProgramme(
   const out: ScreenProgramme[] = [];
   for (const movie of demo.movies.filter((m) => m.is_now_playing)) {
     // Same variant pipeline as the rankings, so the screen page shows the same
-    // package the movie page ranks. demo.dcps is only a legacy fallback.
+    // package the movie page ranks. dcp_variants is the sole DCP source.
     const variant = selectBestDcpVariant(movie, screen);
-    const dcp = variant
-      ? convertVariantToDcp(variant, movie)
-      : (demo.dcps.find((d) => d.screen_id === screenId && d.movie_id === movie.id) ?? null);
-    if (!dcp) continue;
+    if (!variant) continue;
+    const dcp = convertVariantToDcp(variant, movie);
     // An IMAX-only build can't play on this screen — skip incompatible titles.
     const dcpIsImax = dcp.format.some((f) => f.toLowerCase().includes("imax"));
     if (dcpIsImax && !screen.screen_format.toLowerCase().includes("imax")) continue;
