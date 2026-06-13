@@ -220,8 +220,11 @@ export function aspectCompatibilityScore(
   }
 
   // ── VARIABLE ASPECT RATIO MOVIES ──
-  // Titles that switch ratios mid-film: weighted 70% primary / 30% secondary.
-  if (isVariableAspect && movieAspectRatios.length >= 2) {
+  // Only the IMAX variant actually switches ratios mid-film (weighted 70%
+  // primary / 30% secondary). A non-IMAX build of the same title ships in a
+  // single fixed container, so it must be scored against its OWN container
+  // (the dcpContainer passed in), exactly like a non-variable movie.
+  if (isIMAXDcp && isVariableAspect && movieAspectRatios.length >= 2) {
     const primary = movieAspectRatios[0]?.toLowerCase() || "";
     const secondary = movieAspectRatios[1]?.toLowerCase() || "";
 

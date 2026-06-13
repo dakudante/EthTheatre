@@ -41,6 +41,25 @@ export const DEMO_MODE = !isSupabaseConfigured();
 
 const EPOCH = new Date(0).toISOString();
 
+/** Default page size for paginated catalogue queries. */
+const DEFAULT_PAGE_SIZE = 100;
+/** Upper bound on screens fetched per movie ranking. */
+const MAX_SCREENS_PER_MOVIE = 500;
+
+/**
+ * Thrown when a live Supabase fetch fails. Distinguishes a genuine error from
+ * an empty-but-successful result (which previously both rendered as `[]`).
+ */
+export class DataFetchError extends Error {
+  constructor(
+    public readonly source: string,
+    message: string,
+  ) {
+    super(`${source}: ${message}`);
+    this.name = "DataFetchError";
+  }
+}
+
 // ----------------------------- Live row shapes -----------------------------
 interface DbMovieRow {
   id: number | string;
@@ -251,14 +270,18 @@ export async function getNowPlaying(): Promise<Movie[]> {
   return getAllMovies();
 }
 
-export async function getAllMovies(): Promise<Movie[]> {
+export async function getAllMovies(
+  limit = DEFAULT_PAGE_SIZE,
+  offset = 0,
+): Promise<Movie[]> {
   if (DEMO_MODE) return demo.movies;
   const supabase = createReadClient();
   const { data, error } = await supabase
     .from("movies")
     .select("*")
-    .order("movie_name", { ascending: true });
-  if (error) console.error("getAllMovies:", error.message);
+    .order("movie_name", { ascending: true })
+    .range(offset, offset + limit - 1);
+  if (error) throw new DataFetchError("getAllMovies", error.message);
   // The live `movies` table stores one row per DCP variant, so the same title
   // can appear several times. Listing grids represent the movie *entity*, so
   // collapse to one card per unique title (the detail page still ranks every
@@ -601,20 +624,43 @@ async function buildMovieCandidates(
     if (!row) return null;
     movie = mapMovie(row);
     const supabase = createReadClient();
-    const [{ data: screenRows }, { data: theatreRows }] = await Promise.all([
-      supabase.from("screens").select("*"),
-      supabase.from("theatres").select("*"),
-    ]);
-    screens = ((screenRows as DbScreenRow[]) ?? []).map(mapScreen);
-    theatres = new Map(
-      ((theatreRows as DbTheatreRow[]) ?? []).map((t) => [
-        String(t.id),
-        mapTheatre(t),
-      ]),
+
+    // City filter is pushed into the theatres query (live `location` = city);
+    // screens are then limited to those theatres in-query, and paginated.
+    // Filters (.eq/.in) must precede transforms (.order/.range) on the builder.
+    let theatreQuery = supabase.from("theatres").select("*");
+    if (city) theatreQuery = theatreQuery.eq("location", city);
+    const { data: theatreRows, error: theatreErr } = await theatreQuery.order(
+      "name",
+      { ascending: true },
     );
+    if (theatreErr) {
+      throw new DataFetchError("buildMovieCandidates/theatres", theatreErr.message);
+    }
+    const theatreList = (theatreRows as DbTheatreRow[]) ?? [];
+    theatres = new Map(
+      theatreList.map((t) => [String(t.id), mapTheatre(t)]),
+    );
+
+    let screenQuery = supabase.from("screens").select("*");
+    if (city) {
+      screenQuery = screenQuery.in(
+        "theatre_id",
+        theatreList.map((t) => t.id),
+      );
+    }
+    const { data: screenRows, error: screenErr } = await screenQuery.range(
+      0,
+      MAX_SCREENS_PER_MOVIE - 1,
+    );
+    if (screenErr) {
+      throw new DataFetchError("buildMovieCandidates/screens", screenErr.message);
+    }
+    screens = ((screenRows as DbScreenRow[]) ?? []).map(mapScreen);
   }
 
-  if (city) {
+  // Demo mode filters in-memory (the live path already filtered in-query).
+  if (DEMO_MODE && city) {
     const c = city.toLowerCase();
     const matching = new Set(
       Array.from(theatres.values())
@@ -706,7 +752,7 @@ export async function getTheatres(): Promise<Theatre[]> {
     .from("theatres")
     .select("*")
     .order("name", { ascending: true });
-  if (error) console.error("getTheatres:", error.message);
+  if (error) throw new DataFetchError("getTheatres", error.message);
   return ((data as DbTheatreRow[]) ?? []).map(mapTheatre);
 }
 
