@@ -52,11 +52,25 @@ const SCREEN_KB_LOWER = new Map(
   Object.entries(SCREEN_BRAND_KNOWLEDGE).map(([k, v]) => [k.toLowerCase(), v]),
 );
 
+// KB keys longest-first, so a fuzzy match prefers the most specific entry
+// ("STRONG MDI" before the generic "MDI").
+const SCREEN_KB_BY_SPECIFICITY = Object.entries(SCREEN_BRAND_KNOWLEDGE).sort(
+  (a, b) => b[0].length - a[0].length,
+);
+
 function getScreenSpecs(brand: string | null) {
   if (!brand) return null;
-  return (
-    SCREEN_BRAND_KNOWLEDGE[brand] ?? SCREEN_KB_LOWER.get(brand.toLowerCase()) ?? null
-  );
+  const exact = SCREEN_BRAND_KNOWLEDGE[brand] ?? SCREEN_KB_LOWER.get(brand.toLowerCase());
+  if (exact) return exact;
+  // Fuzzy: free-text brands like "Imported STRONG MDI Silver Screen" should hit
+  // "STRONG MDI" (gain 1.8), not the generic "MDI" (1.5). Match the most
+  // specific KB key whose words all appear in the brand string.
+  const b = brand.toLowerCase();
+  for (const [key, val] of SCREEN_KB_BY_SPECIFICITY) {
+    const words = key.toLowerCase().split(/\s+/);
+    if (words.every((w) => b.includes(w))) return val;
+  }
+  return null;
 }
 
 // ── Screen Dimensions Parser ───────────────────────────────────────────────
@@ -243,6 +257,40 @@ export function aspectCompatibilityScore(
   return calculateSingleAspectScore(dcp, screen, spec, isIMAXDcp);
 }
 
+type ContainerKind =
+  | "imax143"
+  | "i190"
+  | "flat"
+  | "scope"
+  | "seventy"
+  | "ultra"
+  | "unknown";
+
+// The dominant container is the marker that appears EARLIEST in the string, not
+// the one earliest in a fixed if/else list. So a messy community string like
+// "Scope 2.39:1 (open matte 1.90:1 IMAX sections)" classifies as Scope (its
+// leading descriptor) rather than IMAX 1.90.
+function dominantContainer(dcp: string): ContainerKind {
+  const markers: [RegExp, ContainerKind][] = [
+    [/1\.43|imax film/, "imax143"],
+    [/1\.90|imax digital/, "i190"],
+    [/1\.85|flat/, "flat"],
+    [/2\.39|2\.40|scope/, "scope"],
+    [/2\.20|70mm/, "seventy"],
+    [/2\.76|ultra|cinerama/, "ultra"],
+  ];
+  let best: ContainerKind = "unknown";
+  let bestIdx = Infinity;
+  for (const [re, kind] of markers) {
+    const m = re.exec(dcp);
+    if (m && m.index < bestIdx) {
+      bestIdx = m.index;
+      best = kind;
+    }
+  }
+  return best;
+}
+
 function calculateSingleAspectScore(
   dcpContainer: string,
   screenFormat: string,
@@ -253,83 +301,81 @@ function calculateSingleAspectScore(
   const screen = screenFormat.toLowerCase();
   const spec = (screenSpec || "").toLowerCase();
 
-  // ── IMAX 1.43:1 (70mm film aperture) ──
-  if (dcp.includes("1.43") || dcp.includes("imax film")) {
-    if (screen.includes("imax 70mm") || spec.includes("70mm"))
-      return { score: 1.0, reason: "IMAX 70mm film aperture — full frame" };
-    if (screen.includes("imax"))
-      return { score: 0.6, reason: "IMAX 1.43 DCP cropped to 1.90 digital" };
-    return { score: 0.1, reason: "Severe cropping on non-IMAX screen" };
-  }
-
-  // ── 1.90:1 (IMAX digital OR a tall non-IMAX ratio) ──
-  if (dcp.includes("1.90") || dcp.includes("imax digital")) {
-    if (isIMAXDcp) {
-      // IMAX-branded 1.90:1 — IMAX screen preferred.
+  switch (dominantContainer(dcp)) {
+    // ── IMAX 1.43:1 (70mm film aperture) ──
+    case "imax143":
+      if (screen.includes("imax 70mm") || spec.includes("70mm"))
+        return { score: 1.0, reason: "IMAX 70mm film aperture — full frame" };
       if (screen.includes("imax"))
-        return { score: 1.0, reason: "IMAX digital on IMAX screen" };
+        return { score: 0.6, reason: "IMAX 1.43 DCP cropped to 1.90 digital" };
+      return { score: 0.1, reason: "Severe cropping on non-IMAX screen" };
+
+    // ── 1.90:1 (IMAX digital OR a tall non-IMAX ratio) ──
+    case "i190":
+      if (isIMAXDcp) {
+        // IMAX-branded 1.90:1 — IMAX screen preferred.
+        if (screen.includes("imax"))
+          return { score: 1.0, reason: "IMAX digital on IMAX screen" };
+        if (screen.includes("flat"))
+          return { score: 0.75, reason: "Minor letterboxing on Flat screen" };
+        if (screen.includes("scope"))
+          return { score: 0.45, reason: "Significant pillarboxing on Scope screen" };
+        return { score: 0.6, reason: "Standard screen" };
+      }
+      // NON-IMAX 1.90:1 (e.g. Lokah Chapter 1, Manjummel Boys) — just a tall
+      // Flat-adjacent ratio, not hardware-exclusive.
+      if (screen.includes("imax") && !screen.includes("70mm"))
+        return { score: 1.0, reason: "Perfect fit on IMAX digital screen" };
       if (screen.includes("flat"))
-        return { score: 0.75, reason: "Minor letterboxing on Flat screen" };
+        return { score: 0.95, reason: "Near-perfect fit on Flat screen (1.90 vs 1.85)" };
       if (screen.includes("scope"))
-        return { score: 0.45, reason: "Significant pillarboxing on Scope screen" };
+        return { score: 0.5, reason: "Pillarboxing on Scope screen" };
+      return { score: 0.7, reason: "Standard screen" };
+
+    // ── Flat 1.85:1 ──
+    case "flat":
+      if (screen.includes("flat"))
+        return { score: 1.0, reason: "Flat DCP on Flat screen — perfect fit" };
+      if (screen.includes("scope"))
+        return { score: 0.5, reason: "Pillarboxing on Scope screen (22% image loss)" };
+      if (screen.includes("imax") && !screen.includes("70mm"))
+        return { score: 0.75, reason: "Minor letterboxing on IMAX digital" };
       return { score: 0.6, reason: "Standard screen" };
-    }
-    // NON-IMAX 1.90:1 (e.g. Lokah Chapter 1, Manjummel Boys) — just a tall
-    // Flat-adjacent ratio, not hardware-exclusive.
-    if (screen.includes("imax") && !screen.includes("70mm"))
-      return { score: 1.0, reason: "Perfect fit on IMAX digital screen" };
-    if (screen.includes("flat"))
-      return { score: 0.95, reason: "Near-perfect fit on Flat screen (1.90 vs 1.85)" };
-    if (screen.includes("scope"))
-      return { score: 0.5, reason: "Pillarboxing on Scope screen" };
-    return { score: 0.7, reason: "Standard screen" };
-  }
 
-  // ── Flat 1.85:1 ──
-  if (dcp.includes("1.85") || dcp.includes("flat")) {
-    if (screen.includes("flat"))
-      return { score: 1.0, reason: "Flat DCP on Flat screen — perfect fit" };
-    if (screen.includes("scope"))
-      return { score: 0.5, reason: "Pillarboxing on Scope screen (22% image loss)" };
-    if (screen.includes("imax") && !screen.includes("70mm"))
-      return { score: 0.75, reason: "Minor letterboxing on IMAX digital" };
-    return { score: 0.6, reason: "Standard screen" };
-  }
+    // ── Scope 2.39:1 ──
+    case "scope":
+      if (screen.includes("scope"))
+        return { score: 1.0, reason: "Scope DCP on Scope screen — perfect fit" };
+      if (screen.includes("flat"))
+        return { score: 0.5, reason: "Letterboxing on Flat screen (25% image loss)" };
+      if (screen.includes("imax") && !screen.includes("70mm"))
+        return { score: 0.65, reason: "Moderate letterboxing on IMAX digital" };
+      return { score: 0.6, reason: "Standard screen" };
 
-  // ── Scope 2.39:1 ──
-  if (dcp.includes("2.39") || dcp.includes("2.40") || dcp.includes("scope")) {
-    if (screen.includes("scope"))
-      return { score: 1.0, reason: "Scope DCP on Scope screen — perfect fit" };
-    if (screen.includes("flat"))
-      return { score: 0.5, reason: "Letterboxing on Flat screen (25% image loss)" };
-    if (screen.includes("imax") && !screen.includes("70mm"))
-      return { score: 0.65, reason: "Moderate letterboxing on IMAX digital" };
-    return { score: 0.6, reason: "Standard screen" };
-  }
+    // ── 70mm / 2.20:1 ──
+    case "seventy":
+      if (screen.includes("70mm") || spec.includes("70mm"))
+        return { score: 1.0, reason: "70mm on 70mm screen" };
+      if (screen.includes("scope"))
+        return { score: 0.85, reason: "Minor letterboxing on Scope" };
+      if (screen.includes("flat"))
+        return { score: 0.6, reason: "Moderate letterboxing on Flat" };
+      return { score: 0.7, reason: "Standard screen" };
 
-  // ── 70mm / 2.20:1 ──
-  if (dcp.includes("2.20") || dcp.includes("70mm")) {
-    if (screen.includes("70mm") || spec.includes("70mm"))
-      return { score: 1.0, reason: "70mm on 70mm screen" };
-    if (screen.includes("scope"))
-      return { score: 0.85, reason: "Minor letterboxing on Scope" };
-    if (screen.includes("flat"))
-      return { score: 0.6, reason: "Moderate letterboxing on Flat" };
-    return { score: 0.7, reason: "Standard screen" };
-  }
+    // ── Ultra-wide 2.76:1 (Cinerama / Ultra Panavision) ──
+    case "ultra":
+      if (screen.includes("scope"))
+        return { score: 0.85, reason: "Best standard fit — slight letterboxing" };
+      if (screen.includes("flat"))
+        return { score: 0.35, reason: "Severe letterboxing on Flat" };
+      if (screen.includes("imax"))
+        return { score: 0.4, reason: "Significant letterboxing" };
+      return { score: 0.6, reason: "Standard screen" };
 
-  // ── Ultra-wide 2.76:1 (Cinerama / Ultra Panavision) ──
-  if (dcp.includes("2.76") || dcp.includes("ultra") || dcp.includes("cinerama")) {
-    if (screen.includes("scope"))
-      return { score: 0.85, reason: "Best standard fit — slight letterboxing" };
-    if (screen.includes("flat"))
-      return { score: 0.35, reason: "Severe letterboxing on Flat" };
-    if (screen.includes("imax"))
-      return { score: 0.4, reason: "Significant letterboxing" };
-    return { score: 0.6, reason: "Standard screen" };
+    // ── Missing / unrecognised container → neutral ──
+    default:
+      return { score: 0.6, reason: "Unknown container match" };
   }
-
-  return { score: 0.6, reason: "Unknown container match" };
 }
 
 function audioScore(mix?: string | null): number {
@@ -387,11 +433,18 @@ function screenClassScore(format?: string | null): {
   return { value: 0.5, accent: "neutral" };
 }
 
-// Pull the largest dimension (feet) out of a free-text screen spec.
-function screenSizeScore(spec?: string | null): number {
-  if (!spec) return 0.45;
-  const nums = spec.match(/\d+(\.\d+)?/g)?.map(Number) ?? [];
-  const width = Math.max(0, ...nums);
+// Score by screen width (feet). Prefers the structured numeric column; falls
+// back to the largest number in any free-text spec/dimensions string.
+function screenSizeScore(
+  widthFt?: number | null,
+  spec?: string | null,
+): number {
+  let width = widthFt ?? 0;
+  if (!width && spec) {
+    const nums = spec.match(/\d+(\.\d+)?/g)?.map(Number) ?? [];
+    width = Math.max(0, ...nums);
+  }
+  if (!width) return 0.45;
   if (width >= 90) return 1;
   if (width >= 70) return 0.85;
   if (width >= 50) return 0.7;
@@ -567,10 +620,11 @@ export function scoreScreen(
     accent: cls.accent,
   });
 
-  const size = screenSizeScore(screen.screen_spec);
+  const sizeText = screen.screen_spec ?? screen.screen_dimensions;
+  const size = screenSizeScore(screen.screen_width_ft, sizeText);
   push({
     label: "Screen size",
-    detail: screen.screen_spec ?? "Not specified",
+    detail: sizeText ?? "Not specified",
     value: size,
     weight: WEIGHTS.hwScreenSize,
   });

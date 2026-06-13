@@ -32,6 +32,10 @@ export interface Screen {
   projector_model: string | null;
   screen_brand: string | null;
   screen_dimensions: string | null;
+  // Structured screen size (feet). Preferred over the free-text fields by
+  // screenSizeScore; parsed from screen_dimensions when the columns are absent.
+  screen_width_ft: number | null;
+  screen_height_ft: number | null;
 }
 
 // Distributor spec sheet: which DCP builds exist for each venue class.

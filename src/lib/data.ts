@@ -113,6 +113,13 @@ interface DbScreenRow {
   projector_model: string | null;
   screen_brand: string | null;
   screen_dimensions: string | null;
+  // Added by migration 0005 (optional until it runs)
+  user_rating?: number | null;
+  review_count?: number | null;
+  number_of_seats?: number | null;
+  three_d_system?: string | null;
+  screen_width_ft?: number | null;
+  screen_height_ft?: number | null;
 }
 
 function splitFormats(s: string | null): string[] {
@@ -168,7 +175,20 @@ function mapTheatre(r: DbTheatreRow): Theatre {
   };
 }
 
+// Parse "72 x 31 ft" → { width: 72, height: 31 } (fallback when the structured
+// screen_width_ft/height_ft columns aren't populated yet).
+function parseDimensions(s: string | null | undefined): {
+  width: number | null;
+  height: number | null;
+} {
+  const m = (s ?? "").match(/(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)/i);
+  return m
+    ? { width: parseFloat(m[1]), height: parseFloat(m[2]) }
+    : { width: null, height: null };
+}
+
 function mapScreen(r: DbScreenRow): Screen {
+  const dims = parseDimensions(r.screen_dimensions);
   return {
     id: String(r.id),
     theatre_id: String(r.theatre_id),
@@ -176,17 +196,22 @@ function mapScreen(r: DbScreenRow): Screen {
     screen_format: r.screen_format ?? "Standard",
     projection_system: r.projection_system ?? "—",
     sound_system: r.sound_system ?? "—",
-    screen_spec: null,
-    number_of_seats: null,
-    three_d_system: null,
-    user_rating: 0,
-    review_count: 0,
+    // Read the real live columns (added by migration 0005) instead of
+    // hardcoding inert values; screen_spec mirrors the free-text dimensions.
+    screen_spec: r.screen_dimensions ?? null,
+    number_of_seats: r.number_of_seats ?? null,
+    three_d_system: r.three_d_system ?? null,
+    user_rating: r.user_rating ?? 0,
+    review_count: r.review_count ?? 0,
     created_at: EPOCH,
     // NEW FIELDS
     projector_brand: r.projector_brand ?? null,
     projector_model: r.projector_model ?? null,
     screen_brand: r.screen_brand ?? null,
     screen_dimensions: r.screen_dimensions ?? null,
+    // Prefer the structured columns; fall back to parsing screen_dimensions.
+    screen_width_ft: r.screen_width_ft ?? dims.width,
+    screen_height_ft: r.screen_height_ft ?? dims.height,
   };
 }
 
@@ -313,7 +338,7 @@ async function fetchMovieRow(id: string): Promise<DbMovieRow | null> {
     .select("*")
     .eq("id", id)
     .maybeSingle();
-  if (error) console.error("fetchMovieRow:", error.message);
+  if (error) throw new DataFetchError("fetchMovieRow", error.message);
   return (data as DbMovieRow) ?? null;
 }
 
@@ -340,17 +365,20 @@ export function parseDcpVariant(raw: string): ParsedDcpVariant {
   else if (lower.includes("4k")) resolution = "4K";
   else if (lower.includes("2k")) resolution = "2K";
 
+  // Channel count: "12ch", "12 ch", "12-Channel", "12 Channel", "5-Channel"…
+  const chMatch = lower.match(/(\d+)\s*(?:ch\b|[-\s]?channel)/);
+
   let audioFormat: string | null = null;
   if (lower.includes("atmo")) audioFormat = "dolby_atmos";
-  else if (lower.includes("dts:x") || lower.includes("dts_x")) audioFormat = "dts_x";
-  else if (lower.includes("imax") && (lower.includes("ch") || lower.includes("channel")))
+  // "dts:x", "dts_x", "dts-x", "dts x", "dtsx"
+  else if (/dts[\s:_-]?x/.test(lower)) audioFormat = "dts_x";
+  else if (lower.includes("imax") && (chMatch || lower.includes("channel")))
     audioFormat = "imax";
   else if (lower.includes("iab")) audioFormat = "iab";
   else if (lower.includes("5.1") || lower.includes("7.1")) audioFormat = "standard";
 
   let audioChannels: string | null = null;
-  if (lower.includes("12ch") || lower.includes("12 ch")) audioChannels = "12.0";
-  else if (lower.includes("5ch") || lower.includes("5 ch")) audioChannels = "5.0";
+  if (chMatch) audioChannels = `${chMatch[1]}.0`; // "12-Channel" → "12.0"
   else if (lower.includes("7.1")) audioChannels = "7.1";
   else if (lower.includes("5.1")) audioChannels = "5.1";
 
@@ -444,9 +472,12 @@ function extractRatio(text: string | null | undefined): string | null {
   return m ? `${m[1]}:1` : null;
 }
 
-// "Scope 2.39:1" → "Scope(2.39:1)"; values already in Name(ratio) form pass through.
+// "Scope 2.39:1" → "Scope(2.39:1)"; values already in Name(ratio) form pass
+// through. Missing data → "Unknown" (a neutral 0.6 in the aspect scorer) rather
+// than confidently asserting Scope, which would misrank Flat films whenever an
+// incomplete community record omits the aspect ratio.
 function normalizeAspectRatio(ratio: string | null | undefined): string {
-  if (!ratio) return "Scope(2.39:1)";
+  if (!ratio || !ratio.trim()) return "Unknown";
   if (ratio.includes("(")) return ratio;
   return ratio.replace(/^([^(]+?)\s+([0-9.:]+)$/, "$1($2)");
 }
@@ -461,7 +492,7 @@ function getStandardAspectRatio(movie: Movie): string {
   }
   const primary = normalizeAspectRatio(movie.aspect_ratio_primary);
   if (!primary.toLowerCase().includes("imax")) return primary;
-  return "Scope(2.39:1)";
+  return "Unknown"; // neutral rather than a confident Scope assertion
 }
 
 function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
@@ -764,7 +795,7 @@ export async function getTheatre(id: string): Promise<Theatre | null> {
     .select("*")
     .eq("id", id)
     .maybeSingle();
-  if (error) console.error("getTheatre:", error.message);
+  if (error) throw new DataFetchError("getTheatre", error.message);
   return data ? mapTheatre(data as DbTheatreRow) : null;
 }
 
@@ -777,7 +808,7 @@ export async function getScreensForTheatre(theatreId: string): Promise<Screen[]>
     .select("*")
     .eq("theatre_id", theatreId)
     .order("screen_name", { ascending: true });
-  if (error) console.error("getScreensForTheatre:", error.message);
+  if (error) throw new DataFetchError("getScreensForTheatre", error.message);
   return ((data as DbScreenRow[]) ?? []).map(mapScreen);
 }
 
@@ -792,7 +823,7 @@ export async function getScreen(id: string): Promise<ScreenWithTheatre | null> {
       .select("*")
       .eq("id", id)
       .maybeSingle();
-    if (error) console.error("getScreen:", error.message);
+    if (error) throw new DataFetchError("getScreen", error.message);
     screen = data ? mapScreen(data as DbScreenRow) : null;
   }
   if (!screen) return null;
@@ -888,7 +919,7 @@ export async function getMovieKeyframes(movieId: string): Promise<MovieKeyframe[
     .select("*")
     .eq("movie_id", movieId)
     .order("display_order", { ascending: true });
-  if (error) console.error("getMovieKeyframes:", error.message);
+  if (error) throw new DataFetchError("getMovieKeyframes", error.message);
   return (data as MovieKeyframe[]) ?? [];
 }
 
@@ -901,7 +932,7 @@ export async function getTheatreInteriorTemplates(): Promise<TheatreInteriorTemp
     .from("theatre_interior_templates")
     .select("*")
     .order("name", { ascending: true });
-  if (error) console.error("getTheatreInteriorTemplates:", error.message);
+  if (error) throw new DataFetchError("getTheatreInteriorTemplates", error.message);
   return (data as TheatreInteriorTemplate[]) ?? [];
 }
 
@@ -935,6 +966,6 @@ export async function getMovieAvailableFormats(movieId: string): Promise<MovieAv
     .eq("movie_id", movieId)
     .eq("is_available", true)
     .order("aspect_ratio", { ascending: true });
-  if (error) console.error("getMovieAvailableFormats:", error.message);
+  if (error) throw new DataFetchError("getMovieAvailableFormats", error.message);
   return (data as MovieAvailableFormat[]) ?? [];
 }

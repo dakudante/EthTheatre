@@ -1,9 +1,16 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Info } from "lucide-react";
 import type { Showtime } from "@/lib/types";
 import { formatShowtime } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 function dayLabel(iso: string): string {
   const d = new Date(iso);
@@ -34,6 +41,21 @@ export function ShowtimeRow({ showtimes }: { showtimes: Showtime[] }) {
 
   return (
     <div>
+      {/* Showtimes are synthetic placeholders until a real booking feed exists. */}
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="mb-2 inline-flex cursor-help items-center gap-1 rounded-full border border-amber-400/25 bg-amber-400/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-200/90">
+              <Info className="size-3" />
+              Estimated times
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            Indicative showtimes — not live booking data. Real schedules require a
+            theatre/booking feed.
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <div className="mb-2 flex gap-1.5">
         {days.map(([label], i) => (
           <button
