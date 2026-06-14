@@ -29,9 +29,21 @@ const PROJECTOR_KB_LOWER = new Map(
 function getProjectorSpecs(brand: string | null, model: string | null) {
   if (!brand || !model) return null;
   const key = `${brand} ${model}`;
-  return (
-    PROJECTOR_KNOWLEDGE_BASE[key] ?? PROJECTOR_KB_LOWER.get(key.toLowerCase()) ?? null
-  );
+  const exact = PROJECTOR_KNOWLEDGE_BASE[key] ?? PROJECTOR_KB_LOWER.get(key.toLowerCase());
+  if (exact) return exact;
+  // Fuzzy fallback: match broad projector categories when KB has no exact entry
+  const t = key.toLowerCase();
+  if (t.includes('rgb') && t.includes('laser'))
+    return { type: 'rgb-laser' as const, estimatedLumens: 25000,
+             resolution: '4K' as const, isDciCompliant: true };
+  if (t.includes('laser') && t.includes('4k'))
+    return { type: 'phosphor-laser' as const, estimatedLumens: 20000,
+             resolution: '4K' as const, isDciCompliant: true };
+  if (t.includes('xenon'))
+    return { type: 'xenon' as const, estimatedLumens: 15000,
+             resolution: (t.includes('4k') ? '4K' : '2K') as '4K' | '2K',
+             isDciCompliant: true };
+  return null;
 }
 
 // ── Screen Brand Knowledge Base ────────────────────────────────────────────
@@ -175,8 +187,8 @@ export interface ScoredScreen {
 const WEIGHTS = {
   // DCP — the file fidelity + how well it matches the room (sums to 0.65)
   dcpResolution: 0.18,
-  dcpFormat: 0.16,
-  dcpAspectCompatibility: 0.15, // DCP container ↔ screen format match
+  dcpFormat: 0.11,               // was 0.16 (offset to fund aspect weight increase)
+  dcpAspectCompatibility: 0.20,  // was 0.15 — aspect fit must outweigh hardware
   dcpAudio: 0.12,
   dcpVerified: 0.04,
   // Hardware — the room (sums to 0.30)
@@ -196,15 +208,15 @@ function resolutionScore(res?: string | null): number {
   return 0.4;
 }
 
-function formatScore(dcpFormats: string[], movieFormats: string[]): number {
+function formatScore(dcpFormats: string[], _movieFormats: string[]): number {
   const set = new Set(dcpFormats.map((f) => f.toLowerCase()));
   let s = 0.4; // baseline 2D digital
   if (set.has("hdr") || set.has("dolby vision")) s += 0.3;
   if (set.has("hfr")) s += 0.15;
   if (set.has("3d")) s += 0.1;
-  // Reward when the screen can actually present a marquee format of the film.
-  const wants = new Set(movieFormats.map((f) => f.toLowerCase()));
-  if (wants.has("imax") && set.has("imax")) s += 0.15;
+  // BUG 8 FIX: Removed IMAX cross-check — with the isCompatible() DCP gate,
+  // an IMAX screen without an IMAX DCP is already excluded; this bonus was
+  // redundant and inflated IMAX scores over equivalent HDR screens.
   return Math.min(1, s);
 }
 
@@ -234,6 +246,19 @@ export function aspectCompatibilityScore(
   }
 
   // ── VARIABLE ASPECT RATIO MOVIES ──
+  // BUG 7 FIX: Hard override — Scope screen must be LAST for movies that
+  // combine wide (2.39) and flat (1.85) ratios, because 1.85 content
+  // pillarboxes badly on Scope regardless of the weighted average.
+  if (isVariableAspect) {
+    const ratios = movieAspectRatios.map(r => r.toLowerCase());
+    const hasWide = ratios.some(r =>
+      r.includes('2.39') || r.includes('scope'));
+    const hasFlat = ratios.some(r =>
+      r.includes('1.85') || r.includes('flat'));
+    if (hasWide && hasFlat && screen.includes('scope'))
+      return { score: 0.05, reason: 'Scope last — 1.85 content pillarboxes on Scope' };
+  }
+
   // Only the IMAX variant actually switches ratios mid-film (weighted 70%
   // primary / 30% secondary). A non-IMAX build of the same title ships in a
   // single fixed container, so it must be scored against its OWN container
@@ -257,125 +282,135 @@ export function aspectCompatibilityScore(
   return calculateSingleAspectScore(dcp, screen, spec, isIMAXDcp);
 }
 
-type ContainerKind =
-  | "imax143"
-  | "i190"
-  | "flat"
-  | "scope"
-  | "seventy"
-  | "ultra"
-  | "unknown";
+// ── BUG 1 FIX: Table-driven aspect priority lookup ─────────────────────────
 
-// The dominant container is the marker that appears EARLIEST in the string, not
-// the one earliest in a fixed if/else list. So a messy community string like
-// "Scope 2.39:1 (open matte 1.90:1 IMAX sections)" classifies as Scope (its
-// leading descriptor) rather than IMAX 1.90.
-function dominantContainer(dcp: string): ContainerKind {
-  const markers: [RegExp, ContainerKind][] = [
-    [/1\.43|imax film/, "imax143"],
-    [/1\.90|imax digital/, "i190"],
-    [/1\.85|flat/, "flat"],
-    [/2\.39|2\.40|scope/, "scope"],
-    [/2\.20|70mm/, "seventy"],
-    [/2\.76|ultra|cinerama/, "ultra"],
+// Screen format classification: map free-text screen_format strings to a
+// canonical screen category used as the column key in ASPECT_PRIORITY.
+type ScreenCategory = 'imax_70mm' | 'imax' | 'dolby' | 'epiq' | 'pxl' | 'scope' | 'flat' | 'standard';
+
+function classifyScreenFormat(screenFormat: string): ScreenCategory {
+  const s = screenFormat.toLowerCase();
+  if (s.includes('imax') && s.includes('70mm')) return 'imax_70mm';
+  if (s.includes('imax')) return 'imax';
+  if (s.includes('dolby')) return 'dolby';
+  if (s.includes('epiq')) return 'epiq';
+  if (s.includes('pxl')) return 'pxl';
+  if (s.includes('scope')) return 'scope';
+  if (s.includes('flat')) return 'flat';
+  return 'standard';
+}
+
+// Ratio key extraction: pull the dominant ratio from a DCP container string.
+type RatioKey = '1.43' | '1.90' | '1.85' | '2.39' | '2.20' | '2.76' | 'unknown';
+
+function resolveRatioKey(dcpContainer: string, isIMAXDcp: boolean): RatioKey {
+  const dcp = dcpContainer.toLowerCase();
+  // Ordered by specificity — earliest match in string wins
+  const markers: [RegExp, RatioKey][] = [
+    [/1\.43|imax film/, '1.43'],
+    [/1\.90|imax digital/, '1.90'],
+    [/1\.85|flat/, '1.85'],
+    [/2\.39|2\.40|scope/, '2.39'],
+    [/2\.20|70mm/, '2.20'],
+    [/2\.76|ultra|cinerama/, '2.76'],
   ];
-  let best: ContainerKind = "unknown";
+  let best: RatioKey = 'unknown';
   let bestIdx = Infinity;
-  for (const [re, kind] of markers) {
+  for (const [re, key] of markers) {
     const m = re.exec(dcp);
     if (m && m.index < bestIdx) {
       bestIdx = m.index;
-      best = kind;
+      best = key;
     }
   }
+  // Non-IMAX 1.90 is Flat-adjacent, not IMAX-exclusive
+  if (best === '1.90' && !isIMAXDcp) best = '1.85';
   return best;
 }
+
+// The priority table: ASPECT_PRIORITY[ratioKey][screenCategory] → { score, reason }
+const ASPECT_PRIORITY: Record<RatioKey, Record<ScreenCategory, { score: number; reason: string }>> = {
+  '1.43': {
+    imax_70mm: { score: 1.0,  reason: 'IMAX 70mm film aperture — full frame' },
+    imax:      { score: 0.6,  reason: 'IMAX 1.43 DCP cropped to 1.90 digital' },
+    dolby:     { score: 0.1,  reason: 'Severe cropping on non-IMAX screen' },
+    epiq:      { score: 0.1,  reason: 'Severe cropping on non-IMAX screen' },
+    pxl:       { score: 0.1,  reason: 'Severe cropping on non-IMAX screen' },
+    scope:     { score: 0.1,  reason: 'Severe cropping on non-IMAX screen' },
+    flat:      { score: 0.1,  reason: 'Severe cropping on non-IMAX screen' },
+    standard:  { score: 0.1,  reason: 'Severe cropping on non-IMAX screen' },
+  },
+  '1.90': {
+    imax_70mm: { score: 0.85, reason: 'IMAX 1.90 on 70mm screen — slight letterboxing' },
+    imax:      { score: 1.0,  reason: 'IMAX digital on IMAX screen' },
+    dolby:     { score: 0.6,  reason: 'Standard screen' },
+    epiq:      { score: 0.6,  reason: 'Standard screen' },
+    pxl:       { score: 0.6,  reason: 'Standard screen' },
+    scope:     { score: 0.45, reason: 'Significant pillarboxing on Scope screen' },
+    flat:      { score: 0.75, reason: 'Minor letterboxing on Flat screen' },
+    standard:  { score: 0.6,  reason: 'Standard screen' },
+  },
+  '1.85': {
+    imax_70mm: { score: 0.6,  reason: 'Moderate letterboxing on IMAX 70mm' },
+    imax:      { score: 0.75, reason: 'Minor letterboxing on IMAX digital' },
+    dolby:     { score: 0.95, reason: 'Near-perfect fit on Dolby screen' },
+    epiq:      { score: 1.0,  reason: 'Flat DCP on EPIQ — perfect fit (1.89:1 ≈ 1.85)' },
+    pxl:       { score: 1.0,  reason: 'Flat DCP on PXL — perfect fit (1.89:1 ≈ 1.85)' },
+    scope:     { score: 0.5,  reason: 'Pillarboxing on Scope screen (22% image loss)' },
+    flat:      { score: 1.0,  reason: 'Flat DCP on Flat screen — perfect fit' },
+    standard:  { score: 0.6,  reason: 'Standard screen' },
+  },
+  '2.39': {
+    imax_70mm: { score: 0.5,  reason: 'Significant letterboxing on IMAX 70mm' },
+    imax:      { score: 0.65, reason: 'Moderate letterboxing on IMAX digital' },
+    dolby:     { score: 0.85, reason: 'Good fit on Dolby screen' },
+    epiq:      { score: 0.75, reason: 'Letterboxing on EPIQ (1.89:1 screen)' },
+    pxl:       { score: 0.75, reason: 'Letterboxing on PXL (1.89:1 screen)' },
+    scope:     { score: 1.0,  reason: 'Scope DCP on Scope screen — perfect fit' },
+    flat:      { score: 0.5,  reason: 'Letterboxing on Flat screen (25% image loss)' },
+    standard:  { score: 0.6,  reason: 'Standard screen' },
+  },
+  '2.20': {
+    imax_70mm: { score: 0.8,  reason: '70mm ratio on IMAX 70mm — close fit' },
+    imax:      { score: 0.7,  reason: '70mm ratio on IMAX digital' },
+    dolby:     { score: 0.7,  reason: 'Standard screen' },
+    epiq:      { score: 0.7,  reason: 'Standard screen' },
+    pxl:       { score: 0.7,  reason: 'Standard screen' },
+    scope:     { score: 0.85, reason: 'Minor letterboxing on Scope' },
+    flat:      { score: 0.6,  reason: 'Moderate letterboxing on Flat' },
+    standard:  { score: 0.7,  reason: 'Standard screen' },
+  },
+  '2.76': {
+    imax_70mm: { score: 0.5,  reason: 'Ultra-wide on IMAX 70mm — significant letterboxing' },
+    imax:      { score: 0.4,  reason: 'Significant letterboxing on IMAX' },
+    dolby:     { score: 0.6,  reason: 'Standard screen' },
+    epiq:      { score: 0.6,  reason: 'Standard screen' },
+    pxl:       { score: 0.6,  reason: 'Standard screen' },
+    scope:     { score: 0.85, reason: 'Best standard fit — slight letterboxing' },
+    flat:      { score: 0.35, reason: 'Severe letterboxing on Flat' },
+    standard:  { score: 0.6,  reason: 'Standard screen' },
+  },
+  unknown: {
+    imax_70mm: { score: 0.6,  reason: 'Unknown container match' },
+    imax:      { score: 0.6,  reason: 'Unknown container match' },
+    dolby:     { score: 0.6,  reason: 'Unknown container match' },
+    epiq:      { score: 0.6,  reason: 'Unknown container match' },
+    pxl:       { score: 0.6,  reason: 'Unknown container match' },
+    scope:     { score: 0.6,  reason: 'Unknown container match' },
+    flat:      { score: 0.6,  reason: 'Unknown container match' },
+    standard:  { score: 0.6,  reason: 'Unknown container match' },
+  },
+};
 
 function calculateSingleAspectScore(
   dcpContainer: string,
   screenFormat: string,
-  screenSpec: string | null,
+  _screenSpec: string | null,
   isIMAXDcp: boolean,
 ): { score: number; reason: string } {
-  const dcp = dcpContainer.toLowerCase();
-  const screen = screenFormat.toLowerCase();
-  const spec = (screenSpec || "").toLowerCase();
-
-  switch (dominantContainer(dcp)) {
-    // ── IMAX 1.43:1 (70mm film aperture) ──
-    case "imax143":
-      if (screen.includes("imax 70mm") || spec.includes("70mm"))
-        return { score: 1.0, reason: "IMAX 70mm film aperture — full frame" };
-      if (screen.includes("imax"))
-        return { score: 0.6, reason: "IMAX 1.43 DCP cropped to 1.90 digital" };
-      return { score: 0.1, reason: "Severe cropping on non-IMAX screen" };
-
-    // ── 1.90:1 (IMAX digital OR a tall non-IMAX ratio) ──
-    case "i190":
-      if (isIMAXDcp) {
-        // IMAX-branded 1.90:1 — IMAX screen preferred.
-        if (screen.includes("imax"))
-          return { score: 1.0, reason: "IMAX digital on IMAX screen" };
-        if (screen.includes("flat"))
-          return { score: 0.75, reason: "Minor letterboxing on Flat screen" };
-        if (screen.includes("scope"))
-          return { score: 0.45, reason: "Significant pillarboxing on Scope screen" };
-        return { score: 0.6, reason: "Standard screen" };
-      }
-      // NON-IMAX 1.90:1 (e.g. Lokah Chapter 1, Manjummel Boys) — just a tall
-      // Flat-adjacent ratio, not hardware-exclusive.
-      if (screen.includes("imax") && !screen.includes("70mm"))
-        return { score: 1.0, reason: "Perfect fit on IMAX digital screen" };
-      if (screen.includes("flat"))
-        return { score: 0.95, reason: "Near-perfect fit on Flat screen (1.90 vs 1.85)" };
-      if (screen.includes("scope"))
-        return { score: 0.5, reason: "Pillarboxing on Scope screen" };
-      return { score: 0.7, reason: "Standard screen" };
-
-    // ── Flat 1.85:1 ──
-    case "flat":
-      if (screen.includes("flat"))
-        return { score: 1.0, reason: "Flat DCP on Flat screen — perfect fit" };
-      if (screen.includes("scope"))
-        return { score: 0.5, reason: "Pillarboxing on Scope screen (22% image loss)" };
-      if (screen.includes("imax") && !screen.includes("70mm"))
-        return { score: 0.75, reason: "Minor letterboxing on IMAX digital" };
-      return { score: 0.6, reason: "Standard screen" };
-
-    // ── Scope 2.39:1 ──
-    case "scope":
-      if (screen.includes("scope"))
-        return { score: 1.0, reason: "Scope DCP on Scope screen — perfect fit" };
-      if (screen.includes("flat"))
-        return { score: 0.5, reason: "Letterboxing on Flat screen (25% image loss)" };
-      if (screen.includes("imax") && !screen.includes("70mm"))
-        return { score: 0.65, reason: "Moderate letterboxing on IMAX digital" };
-      return { score: 0.6, reason: "Standard screen" };
-
-    // ── 70mm / 2.20:1 ──
-    case "seventy":
-      if (screen.includes("70mm") || spec.includes("70mm"))
-        return { score: 1.0, reason: "70mm on 70mm screen" };
-      if (screen.includes("scope"))
-        return { score: 0.85, reason: "Minor letterboxing on Scope" };
-      if (screen.includes("flat"))
-        return { score: 0.6, reason: "Moderate letterboxing on Flat" };
-      return { score: 0.7, reason: "Standard screen" };
-
-    // ── Ultra-wide 2.76:1 (Cinerama / Ultra Panavision) ──
-    case "ultra":
-      if (screen.includes("scope"))
-        return { score: 0.85, reason: "Best standard fit — slight letterboxing" };
-      if (screen.includes("flat"))
-        return { score: 0.35, reason: "Severe letterboxing on Flat" };
-      if (screen.includes("imax"))
-        return { score: 0.4, reason: "Significant letterboxing" };
-      return { score: 0.6, reason: "Standard screen" };
-
-    // ── Missing / unrecognised container → neutral ──
-    default:
-      return { score: 0.6, reason: "Unknown container match" };
-  }
+  const ratioKey = resolveRatioKey(dcpContainer, isIMAXDcp);
+  const screenCat = classifyScreenFormat(screenFormat);
+  return ASPECT_PRIORITY[ratioKey][screenCat];
 }
 
 function audioScore(mix?: string | null): number {
@@ -426,11 +461,10 @@ function screenClassScore(format?: string | null): {
     return { value: 0.82, accent: "epiq" };
   if (v.includes("4dx") || v.includes("luxe") || v.includes("premium"))
     return { value: 0.7, accent: "premium" };
-  // Scope and Flat are both plain containers — neither class is inherently
-  // better; fit with the DCP is judged by the aspect-match factor instead.
-  if (v.includes("scope") || v.includes("flat"))
-    return { value: 0.6, accent: "neutral" };
-  return { value: 0.5, accent: "neutral" };
+  // BUG 2 FIX: Scope and Flat equalized — both are plain container shapes,
+  // neither inherently "better". Fit is judged by the aspect-match factor.
+  if (v.includes("scope")) return { value: 0.55, accent: "neutral" };
+  return { value: 0.55, accent: "neutral" };
 }
 
 // Score by screen width (feet). Prefers the structured numeric column; falls
@@ -628,48 +662,50 @@ export function scoreScreen(
     value: size,
     weight: WEIGHTS.hwScreenSize,
   });
-  // ── Enhanced hardware bonuses (only if data available) ──
+  // ── BUG 5 FIX: ALWAYS push all 4 enhanced bonus slots ──
+  // Use 0.5 neutral fallback when KB data isn't available, so every screen
+  // has the same weight denominator and scores are comparable.
   // All four are gated by aspectFitMultiplier: premium hardware showing the
   // wrong frame shape must not out-bonus a correctly fitted average screen.
-  if (projectorSpecs) {
-    push({
-      label: "Projector model",
-      detail: `${screen.projector_brand} ${screen.projector_model}`,
-      value: projectorSpecBonus * aspectFitMultiplier,
-      weight: 0.03,
-      accent: projectorSpecBonus >= 0.9 ? "premium" : "neutral",
-    });
-  }
+  push({
+    label: "Projector model",
+    detail: projectorSpecs
+      ? `${screen.projector_brand} ${screen.projector_model}`
+      : "Unknown projector",
+    value: (projectorSpecs ? projectorSpecBonus : 0.5) * aspectFitMultiplier,
+    weight: 0.03,
+    accent: projectorSpecBonus >= 0.9 ? "premium" : "neutral",
+  });
 
-  if (screenSpecs && dcp) {
-    push({
-      label: "Screen material",
-      detail: `${screen.screen_brand} (${screenSpecs.material}, gain ${screenSpecs.gain})`,
-      value: screenGainMatch * aspectFitMultiplier,
-      weight: 0.03,
-      accent: screenGainMatch >= 0.9 ? "premium" : "neutral",
-    });
-  }
+  push({
+    label: "Screen material",
+    detail: (screenSpecs && dcp)
+      ? `${screen.screen_brand} (${screenSpecs.material}, gain ${screenSpecs.gain})`
+      : "Unknown screen material",
+    value: ((screenSpecs && dcp) ? screenGainMatch : 0.5) * aspectFitMultiplier,
+    weight: 0.03,
+    accent: screenGainMatch >= 0.9 ? "premium" : "neutral",
+  });
 
-  if (projectorSpecs && screenDims) {
-    push({
-      label: "Pixel density",
-      detail: `${projectorSpecs.resolution} on ${screenDims.widthFt}ft screen`,
-      value: pixelDensityAdequacy * aspectFitMultiplier,
-      weight: 0.04,
-      accent: pixelDensityAdequacy >= 0.9 ? "premium" : "neutral",
-    });
-  }
+  push({
+    label: "Pixel density",
+    detail: (projectorSpecs && screenDims)
+      ? `${projectorSpecs.resolution} on ${screenDims.widthFt}ft screen`
+      : "Unknown pixel density",
+    value: ((projectorSpecs && screenDims) ? pixelDensityAdequacy : 0.5) * aspectFitMultiplier,
+    weight: 0.04,
+    accent: pixelDensityAdequacy >= 0.9 ? "premium" : "neutral",
+  });
 
-  if (projectorSpecs && screenDims && screenSpecs) {
-    push({
-      label: "Brightness estimate",
-      detail: `${projectorSpecs.estimatedLumens}lm × ${screenSpecs.gain} gain / ${Math.round(screenDims.areaSqFt)}sqft`,
-      value: brightnessEstimate * aspectFitMultiplier,
-      weight: 0.03,
-      accent: brightnessEstimate >= 0.9 ? "premium" : "neutral",
-    });
-  }
+  push({
+    label: "Brightness estimate",
+    detail: (projectorSpecs && screenDims && screenSpecs)
+      ? `${projectorSpecs.estimatedLumens}lm × ${screenSpecs.gain} gain / ${Math.round(screenDims.areaSqFt)}sqft`
+      : "Unknown brightness",
+    value: ((projectorSpecs && screenDims && screenSpecs) ? brightnessEstimate : 0.5) * aspectFitMultiplier,
+    weight: 0.03,
+    accent: brightnessEstimate >= 0.9 ? "premium" : "neutral",
+  });
   // ---- Crowd ----
   push({
     label: "Audience rating",
@@ -769,8 +805,24 @@ const hasImax = (value?: string | null) =>
  */
 export function isCompatible(screen: Screen, dcp: Dcp | null): boolean {
   if (!dcp) return true; // no package info — allow with a neutral score
-  const dcpIsImax = dcp.format.some((f) => hasImax(f));
+
+  const dcpFormatsLower = dcp.format.map(f => f.toLowerCase());
+  const has = (tag: string) => dcpFormatsLower.some(f => f.includes(tag));
+
+  // DCP-side gate: IMAX DCP can only play on IMAX screen
+  const dcpIsImax = has('imax');
   if (dcpIsImax && !hasImax(screen.screen_format)) return false;
+
+  // BUG 3 FIX: Screen-side gates — gated screens are excluded from ranking
+  // when no matching-format DCP exists for this movie.
+  const screenCat = classifyScreenFormat(screen.screen_format);
+  const isDolbyScreen = screenCat === 'dolby';
+
+  if (screenCat === 'imax' && !has('imax')) return false;
+  if (screenCat === 'imax_70mm' && !(has('imax') && has('70mm'))) return false;
+  if (screenCat === '70mm' as ScreenCategory && !has('70mm')) return false;
+  if (isDolbyScreen && !(has('dolby') || has('vision'))) return false;
+
   return true;
 }
 
