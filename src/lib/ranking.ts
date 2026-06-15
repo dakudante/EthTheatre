@@ -184,21 +184,39 @@ export interface ScoredScreen {
   breakdown: ScoreBreakdown[];
 }
 
-const WEIGHTS = {
-  // DCP — the file fidelity + how well it matches the room (sums to 0.65)
-  dcpResolution: 0.18,
-  dcpFormat: 0.11,               // was 0.16 (offset to fund aspect weight increase)
-  dcpAspectCompatibility: 0.20,  // was 0.15 — aspect fit must outweigh hardware
-  dcpAudio: 0.12,
-  dcpVerified: 0.04,
-  // Hardware — the room (sums to 0.30)
-  hwProjection: 0.11,
-  hwSound: 0.1,
-  hwScreenClass: 0.07,
-  hwScreenSize: 0.02,
-  // Crowd (0.05)
-  crowd: 0.05,
+// ── V2 Adaptive Weight System ─────────────────────────────────────────────
+
+// When DCPs differ → DCP quality dominates (the file matters most)
+const DCP_DOMINANT = { dcp: 0.55, aspect: 0.15, hw: 0.25, crowd: 0.05 };
+// When DCPs are identical → hardware dominates (the room matters most)  
+const HW_DOMINANT  = { dcp: 0.15, aspect: 0.25, hw: 0.50, crowd: 0.10 };
+
+function stddev(arr: number[]): number {
+  if (arr.length <= 1) return 0;
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  return Math.sqrt(arr.reduce((sum, v) => sum + (v - mean) ** 2, 0) / arr.length);
+}
+
+function adaptiveWeights(dcpSpread: number) {
+  // alpha: 0 = identical DCPs, 1 = highly varied DCPs
+  // threshold 0.15: beyond this spread, DCP differences are "significant"
+  const alpha = Math.min(1, dcpSpread / 0.15);
+  return {
+    dcp:    alpha * DCP_DOMINANT.dcp    + (1 - alpha) * HW_DOMINANT.dcp,
+    aspect: alpha * DCP_DOMINANT.aspect + (1 - alpha) * HW_DOMINANT.aspect,
+    hw:     alpha * DCP_DOMINANT.hw     + (1 - alpha) * HW_DOMINANT.hw,
+    crowd:  alpha * DCP_DOMINANT.crowd  + (1 - alpha) * HW_DOMINANT.crowd,
+  };
+}
+
+// ── Hardware sub-weights (within the hardware portion) ────────────────────
+const HW_SUB = {
+  projection:  0.30, // projector type + lumens
+  screenReal:  0.30, // size + pixel density + brightness (merged)
+  sound:       0.25, // sound system hardware
+  material:    0.15, // screen gain + material match
 };
+
 
 function resolutionScore(res?: string | null): number {
   const v = (res ?? "").toLowerCase();
@@ -448,7 +466,7 @@ function soundHardwareScore(sound?: string | null): number {
   return 0.45;
 }
 
-function screenClassScore(format?: string | null): {
+export function screenClassScore(format?: string | null): {
   value: number;
   accent: ScoreBreakdown["accent"];
 } {
@@ -469,7 +487,7 @@ function screenClassScore(format?: string | null): {
 
 // Score by screen width (feet). Prefers the structured numeric column; falls
 // back to the largest number in any free-text spec/dimensions string.
-function screenSizeScore(
+export function screenSizeScore(
   widthFt?: number | null,
   spec?: string | null,
 ): number {
@@ -486,243 +504,304 @@ function screenSizeScore(
   return 0.45;
 }
 
-export function scoreScreen(
-  movie: Movie,
-  screen: Screen,
-  dcp: Dcp | null,
-): ScoredScreen {
-  const breakdown: ScoreBreakdown[] = [];
-  const push = (
-    b: Omit<ScoreBreakdown, "accent"> & { accent?: ScoreBreakdown["accent"] },
-  ) => breakdown.push({ accent: "neutral", ...b });
-  // ── Enhanced hardware lookups (only used if data is available) ──
-  const projectorSpecs = getProjectorSpecs(screen.projector_brand, screen.projector_model);
+function screenRealEstateScoreDetails(screen: Screen) {
+  const dims = parseScreenDimensions(screen.screen_dimensions);
+  const projSpecs = getProjectorSpecs(screen.projector_brand, screen.projector_model);
+  const scrSpecs = getScreenSpecs(screen.screen_brand);
+
+  if (!dims) {
+    return {
+      score: 0.45,
+      sizeScore: 0.45,
+      densityScore: 0.45,
+      brightnessScore: 0.45,
+      dims: null,
+      projSpecs,
+      scrSpecs,
+    };
+  }
+
+  // Size score (continuous, not stepped)
+  // 90+ ft = 1.0, 20 ft = 0.3, logarithmic curve
+  const sizeScore = Math.max(0.1, Math.min(1, 0.3 + 0.7 * Math.log(dims.widthFt / 20) / Math.log(90 / 20)));
+
+  // Pixel density bonus (0..1)
+  let densityScore = 0.7;
+  if (projSpecs) {
+    const resWidth = projSpecs.resolution === "4K" ? 4096 : 2048;
+    const pxPerFt = resWidth / dims.widthFt;
+    densityScore = pxPerFt >= 80 ? 1.0 : pxPerFt >= 50 ? 0.9 : pxPerFt >= 30 ? 0.75 : 0.5;
+  }
+
+  // Brightness bonus (0..1)
+  let brightnessScore = 0.7;
+  if (projSpecs && scrSpecs) {
+    const areaSqM = dims.areaSqFt * 0.0929;
+    const nits = (projSpecs.estimatedLumens * scrSpecs.gain) / (areaSqM * Math.PI);
+    brightnessScore = nits >= 100 ? 1.0 : nits >= 60 ? 0.9 : nits >= 40 ? 0.75 : nits >= 25 ? 0.55 : 0.35;
+  }
+
+  // Weighted composite — size is dominant, density and brightness are multipliers
+  const score = sizeScore * 0.50 + densityScore * 0.25 + brightnessScore * 0.25;
+  return { score, sizeScore, densityScore, brightnessScore, dims, projSpecs, scrSpecs };
+}
+
+export function screenRealEstateScore(screen: Screen, dcp: Dcp | null): number {
+  void dcp;
+  return screenRealEstateScoreDetails(screen).score;
+}
+
+export function screenMaterialScore(screen: Screen, dcp: Dcp | null): number {
   const screenSpecs = getScreenSpecs(screen.screen_brand);
-  const screenDims = parseScreenDimensions(screen.screen_dimensions);
-
-  // Projector spec bonus (0..1) — trust factor when model is known
-  let projectorSpecBonus = 0;
-  if (projectorSpecs) {
-    if (projectorSpecs.type === "rgb-laser") projectorSpecBonus = 1.0;
-    else if (projectorSpecs.type === "phosphor-laser") projectorSpecBonus = 0.85;
-    else if (projectorSpecs.type === "xenon") projectorSpecBonus = 0.6;
-    else projectorSpecBonus = 0.5;
+  if (!screenSpecs || !dcp) return 0.5; // neutral fallback
+  const is3D = dcp.format.some(f => f.toLowerCase().includes("3d"));
+  if (is3D) {
+    return screenSpecs.material === "silver" ? 1.0 : 0.4;
+  } else {
+    return screenSpecs.material === "silver" ? 0.7 : 1.0;
   }
+}
 
-  // Screen gain match (0..1) — does screen material suit the content?
-  let screenGainMatch = 0.6; // neutral default
-  if (screenSpecs && dcp) {
-    const is3D = dcp.format.some(f => f.toLowerCase().includes("3d"));
-    if (is3D && screenSpecs.material === "silver") screenGainMatch = 1.0;
-    else if (is3D && screenSpecs.material === "matte-white") screenGainMatch = 0.4;
-    else if (!is3D && screenSpecs.material === "silver") screenGainMatch = 0.7; // slight penalty for 2D on silver
-    else if (!is3D && screenSpecs.material === "matte-white") screenGainMatch = 1.0;
-  }
-
-  // Pixel density adequacy (0..1) — resolution vs screen size
-  let pixelDensityAdequacy = 0.7; // neutral
-  if (projectorSpecs && screenDims) {
-    const resWidth = projectorSpecs.resolution === "4K" ? 4096 : 2048;
-    const pixelsPerFoot = resWidth / screenDims.widthFt;
-    // 2K on 90ft = 22.7 px/ft (bad), 4K on 40ft = 102 px/ft (excellent)
-    if (pixelsPerFoot >= 80) pixelDensityAdequacy = 1.0;
-    else if (pixelsPerFoot >= 50) pixelDensityAdequacy = 0.9;
-    else if (pixelsPerFoot >= 30) pixelDensityAdequacy = 0.75;
-    else if (pixelsPerFoot >= 20) pixelDensityAdequacy = 0.5;
-    else pixelDensityAdequacy = 0.3;
-  }
-
-  // Brightness estimate (0..1) — lumens * gain / area
-  let brightnessEstimate = 0.7; // neutral
-  if (projectorSpecs && screenDims && screenSpecs) {
-    const nitsEstimate = (projectorSpecs.estimatedLumens * screenSpecs.gain) / (screenDims.areaSqFt * 0.3048 * 0.3048 * Math.PI);
-    if (nitsEstimate >= 100) brightnessEstimate = 1.0;
-    else if (nitsEstimate >= 60) brightnessEstimate = 0.9;
-    else if (nitsEstimate >= 40) brightnessEstimate = 0.75;
-    else if (nitsEstimate >= 25) brightnessEstimate = 0.55;
-    else brightnessEstimate = 0.35;
-  }
-
-  // ── Aspect-fit multiplier: gate hardware bonuses on picture shape ──
-  // Brightness/sharpness of the WRONG frame shape is not "better": a top-tier
-  // projector on a pillarboxed screen must not out-bonus a correctly fitted
-  // average screen. 1.0 fit → full bonus, 0.5 fit → half, floored at 0.3
-  // (a mismatched screen is still a functioning room). Stays 1 when no DCP.
-  let aspectFitMultiplier = 1;
-
-  // ---- DCP dimension ----
-  if (dcp) {
+/**
+ * V2: Score all candidate screens together so adaptive weighting can
+ * measure DCP variance across the set. Returns scored screens in
+ * descending order.
+ */
+export function scoreScreens(
+  movie: Movie,
+  candidates: Array<{ screen: Screen; dcp: Dcp | null }>,
+): Array<ScoredScreen & { screen: Screen; dcp: Dcp | null }> {
+  // Phase 1: Compute raw DCP quality for each candidate
+  const rawDcp = candidates.map(({ dcp }) => {
+    if (!dcp) return 0.3; // unknown DCP = low floor
     const res = resolutionScore(dcp.resolution);
-    push({
-      label: "DCP resolution",
-      detail: dcp.resolution,
-      value: res,
-      weight: WEIGHTS.dcpResolution,
-      accent: res >= 0.9 ? "premium" : "neutral",
-    });
-
     const fmt = formatScore(dcp.format);
-    push({
-      label: "DCP format",
-      detail: dcp.format.length ? dcp.format.join(", ") : "2D",
-      value: fmt,
-      weight: WEIGHTS.dcpFormat,
-      accent: fmt >= 0.7 ? "premium" : "neutral",
-    });
+    const aud = audioScore(dcp.audio_mix);
+    const ver = dcp.verified ? 1.0 : 0.6;
+    return res * 0.35 + fmt * 0.30 + aud * 0.25 + ver * 0.10;
+  });
 
-    const isIMAXDcp = dcp.format.some((f) => f.toLowerCase().includes("imax"));
+  // Phase 2: Compute DCP spread and adaptive weights
+  const spread = stddev(rawDcp);
+  const W = adaptiveWeights(spread);
+
+  // Phase 3: Score each screen with adaptive weights
+  return candidates.map(({ screen, dcp }, i) => {
+    const breakdown: ScoreBreakdown[] = [];
+    const push = (
+      b: Omit<ScoreBreakdown, "accent"> & { accent?: ScoreBreakdown["accent"] },
+    ) => breakdown.push({ accent: "neutral", ...b });
+
+    // DCP composite (already computed)
+    const dcpScore = rawDcp[i];
+
+    // Aspect fit
+    const isIMAXDcp = dcp?.format.some(f => f.toLowerCase().includes('imax')) ?? false;
     const aspectResult = aspectCompatibilityScore(
-      dcp.aspect_ratio_container,
+      dcp?.aspect_ratio_container ?? '',
       screen.screen_format,
       screen.screen_spec,
       isIMAXDcp,
       movie.is_variable_aspect,
       movie.aspect_ratio_variants,
     );
+
+    // Hardware composite (4 sub-scores with fixed internal weights)
+    const proj = projectionScore(screen.projection_system);
+    const snd = soundHardwareScore(screen.sound_system);
+    const reDetails = screenRealEstateScoreDetails(screen);
+    const realEstate = reDetails.score;
+    const material = screenMaterialScore(screen, dcp);
+
+    const hwScore = (
+      proj * HW_SUB.projection +
+      realEstate * HW_SUB.screenReal +
+      snd * HW_SUB.sound +
+      material * HW_SUB.material
+    );
+
+    // Crowd
+    const crowdScore = screen.user_rating != null
+      ? screen.user_rating / 5
+      : 0.5;
+
+    // Final adaptive-weighted score
+    const raw = (
+      dcpScore * W.dcp +
+      aspectResult.score * W.aspect +
+      hwScore * W.hw +
+      crowdScore * W.crowd
+    );
+    const score = Math.round(Math.min(100, raw * 100) * 10) / 10;
+
+    // Populate breakdown array
+    if (dcp) {
+      const res = resolutionScore(dcp.resolution);
+      push({
+        label: "DCP resolution",
+        detail: dcp.resolution,
+        value: res,
+        weight: W.dcp * 0.35,
+        accent: res >= 0.9 ? "premium" : "neutral",
+      });
+
+      const fmt = formatScore(dcp.format);
+      push({
+        label: "DCP format",
+        detail: dcp.format.length ? dcp.format.join(", ") : "2D",
+        value: fmt,
+        weight: W.dcp * 0.30,
+        accent: fmt >= 0.7 ? "premium" : "neutral",
+      });
+
+      push({
+        label: "Aspect match",
+        detail: aspectResult.reason,
+        value: aspectResult.score,
+        weight: W.aspect,
+        accent:
+          aspectResult.score >= 0.9
+            ? "premium"
+            : aspectResult.score >= 0.6
+              ? "neutral"
+              : "imax",
+      });
+
+      const aud = audioScore(dcp.audio_mix);
+      push({
+        label: "DCP audio mix",
+        detail: dcp.audio_mix,
+        value: aud,
+        weight: W.dcp * 0.25,
+        accent: aud >= 0.9 ? "dolby" : "neutral",
+      });
+
+      push({
+        label: "Verification",
+        detail: dcp.verified
+          ? `Verified${dcp.source ? ` · ${dcp.source}` : ""}`
+          : "Unverified spec",
+        value: dcp.verified ? 1.0 : 0.6,
+        weight: W.dcp * 0.10,
+      });
+    } else {
+      push({
+        label: "DCP",
+        detail: "No confirmed package",
+        value: 0.3,
+        weight: W.dcp,
+      });
+
+      push({
+        label: "Aspect match",
+        detail: aspectResult.reason,
+        value: aspectResult.score,
+        weight: W.aspect,
+        accent:
+          aspectResult.score >= 0.9
+            ? "premium"
+            : aspectResult.score >= 0.6
+              ? "neutral"
+              : "imax",
+      });
+    }
+
     push({
-      label: "Aspect match",
-      detail: aspectResult.reason,
-      value: aspectResult.score,
-      weight: WEIGHTS.dcpAspectCompatibility,
-      accent:
-        aspectResult.score >= 0.9
-          ? "premium"
-          : aspectResult.score >= 0.6
-            ? "neutral"
-            : "imax",
-    });
-    aspectFitMultiplier = Math.max(0.3, aspectResult.score);
-
-    const aud = audioScore(dcp.audio_mix);
-    push({
-      label: "DCP audio mix",
-      detail: dcp.audio_mix,
-      value: aud,
-      weight: WEIGHTS.dcpAudio,
-      accent: aud >= 0.9 ? "dolby" : "neutral",
+      label: "Projection",
+      detail: screen.projection_system,
+      value: proj,
+      weight: W.hw * HW_SUB.projection,
+      accent: proj >= 0.9 ? "premium" : "neutral",
     });
 
     push({
-      label: "Verification",
-      detail: dcp.verified
-        ? `Verified${dcp.source ? ` · ${dcp.source}` : ""}`
-        : "Unverified spec",
-      value: dcp.verified ? 1 : 0.3,
-      weight: WEIGHTS.dcpVerified,
+      label: "Sound system",
+      detail: screen.sound_system,
+      value: snd,
+      weight: W.hw * HW_SUB.sound,
+      accent: snd >= 0.9 ? "dolby" : "neutral",
     });
-  } else {
-    // No DCP on record — neutralize the DCP weight band so screens without a
-    // confirmed package aren't unduly punished, but can't top a verified one.
+
+    const sizeText = screen.screen_spec ?? screen.screen_dimensions;
     push({
-      label: "DCP",
-      detail: "No confirmed package",
-      value: 0.45,
-      weight:
-        WEIGHTS.dcpResolution +
-        WEIGHTS.dcpFormat +
-        WEIGHTS.dcpAspectCompatibility +
-        WEIGHTS.dcpAudio +
-        WEIGHTS.dcpVerified,
+      label: "Screen size",
+      detail: sizeText ?? "Not specified",
+      value: reDetails.sizeScore,
+      weight: W.hw * HW_SUB.screenReal * 0.50,
     });
-  }
 
-  // ---- Hardware dimension ----
-  const proj = projectionScore(screen.projection_system);
-  push({
-    label: "Projection",
-    detail: screen.projection_system,
-    value: proj,
-    weight: WEIGHTS.hwProjection,
-    accent: proj >= 0.9 ? "premium" : "neutral",
-  });
+    push({
+      label: "Pixel density",
+      detail: (reDetails.projSpecs && reDetails.dims)
+        ? `${reDetails.projSpecs.resolution} on ${reDetails.dims.widthFt}ft screen`
+        : "Unknown pixel density",
+      value: reDetails.densityScore,
+      weight: W.hw * HW_SUB.screenReal * 0.25,
+      accent: reDetails.densityScore >= 0.9 ? "premium" : "neutral",
+    });
 
-  const snd = soundHardwareScore(screen.sound_system);
-  push({
-    label: "Sound system",
-    detail: screen.sound_system,
-    value: snd,
-    weight: WEIGHTS.hwSound,
-    accent: snd >= 0.9 ? "dolby" : "neutral",
-  });
+    push({
+      label: "Brightness estimate",
+      detail: (reDetails.projSpecs && reDetails.dims && reDetails.scrSpecs)
+        ? `${reDetails.projSpecs.estimatedLumens}lm × ${reDetails.scrSpecs.gain} gain / ${Math.round(reDetails.dims.areaSqFt)}sqft`
+        : "Unknown brightness",
+      value: reDetails.brightnessScore,
+      weight: W.hw * HW_SUB.screenReal * 0.25,
+      accent: reDetails.brightnessScore >= 0.9 ? "premium" : "neutral",
+    });
 
-  const cls = screenClassScore(screen.screen_format);
-  push({
-    label: "Screen class",
-    detail: screen.screen_format,
-    value: cls.value,
-    weight: WEIGHTS.hwScreenClass,
-    accent: cls.accent,
-  });
+    const screenSpecs = getScreenSpecs(screen.screen_brand);
+    push({
+      label: "Screen material",
+      detail: (screenSpecs && dcp)
+        ? `${screen.screen_brand} (${screenSpecs.material}, gain ${screenSpecs.gain})`
+        : "Unknown screen material",
+      value: material,
+      weight: W.hw * HW_SUB.material,
+      accent: material >= 0.9 ? "premium" : "neutral",
+    });
 
-  const sizeText = screen.screen_spec ?? screen.screen_dimensions;
-  const size = screenSizeScore(screen.screen_width_ft, sizeText);
-  push({
-    label: "Screen size",
-    detail: sizeText ?? "Not specified",
-    value: size,
-    weight: WEIGHTS.hwScreenSize,
-  });
-  // ── BUG 5 FIX: ALWAYS push all 4 enhanced bonus slots ──
-  // Use 0.5 neutral fallback when KB data isn't available, so every screen
-  // has the same weight denominator and scores are comparable.
-  // All four are gated by aspectFitMultiplier: premium hardware showing the
-  // wrong frame shape must not out-bonus a correctly fitted average screen.
-  push({
-    label: "Projector model",
-    detail: projectorSpecs
-      ? `${screen.projector_brand} ${screen.projector_model}`
-      : "Unknown projector",
-    value: (projectorSpecs ? projectorSpecBonus : 0.5) * aspectFitMultiplier,
-    weight: 0.03,
-    accent: projectorSpecBonus >= 0.9 ? "premium" : "neutral",
-  });
+    const projectorSpecs = getProjectorSpecs(screen.projector_brand, screen.projector_model);
+    let projectorSpecBonus = 0.5;
+    if (projectorSpecs) {
+      if (projectorSpecs.type === "rgb-laser") projectorSpecBonus = 1.0;
+      else if (projectorSpecs.type === "phosphor-laser") projectorSpecBonus = 0.85;
+      else if (projectorSpecs.type === "xenon") projectorSpecBonus = 0.6;
+    }
+    push({
+      label: "Projector model",
+      detail: projectorSpecs
+        ? `${screen.projector_brand} ${screen.projector_model}`
+        : "Unknown projector",
+      value: projectorSpecBonus,
+      weight: 0.0,
+      accent: projectorSpecBonus >= 0.9 ? "premium" : "neutral",
+    });
 
-  push({
-    label: "Screen material",
-    detail: (screenSpecs && dcp)
-      ? `${screen.screen_brand} (${screenSpecs.material}, gain ${screenSpecs.gain})`
-      : "Unknown screen material",
-    value: ((screenSpecs && dcp) ? screenGainMatch : 0.5) * aspectFitMultiplier,
-    weight: 0.03,
-    accent: screenGainMatch >= 0.9 ? "premium" : "neutral",
-  });
+    push({
+      label: "Audience rating",
+      detail: screen.review_count
+        ? `${screen.user_rating.toFixed(1)} / 5 · ${screen.review_count} reviews`
+        : "No reviews yet",
+      value: crowdScore,
+      weight: W.crowd,
+    });
 
-  push({
-    label: "Pixel density",
-    detail: (projectorSpecs && screenDims)
-      ? `${projectorSpecs.resolution} on ${screenDims.widthFt}ft screen`
-      : "Unknown pixel density",
-    value: ((projectorSpecs && screenDims) ? pixelDensityAdequacy : 0.5) * aspectFitMultiplier,
-    weight: 0.04,
-    accent: pixelDensityAdequacy >= 0.9 ? "premium" : "neutral",
-  });
+    const reason = buildReason(breakdown, dcp);
 
-  push({
-    label: "Brightness estimate",
-    detail: (projectorSpecs && screenDims && screenSpecs)
-      ? `${projectorSpecs.estimatedLumens}lm × ${screenSpecs.gain} gain / ${Math.round(screenDims.areaSqFt)}sqft`
-      : "Unknown brightness",
-    value: ((projectorSpecs && screenDims && screenSpecs) ? brightnessEstimate : 0.5) * aspectFitMultiplier,
-    weight: 0.03,
-    accent: brightnessEstimate >= 0.9 ? "premium" : "neutral",
-  });
-  // ---- Crowd ----
-  push({
-    label: "Audience rating",
-    detail: screen.review_count
-      ? `${screen.user_rating.toFixed(1)} / 5 · ${screen.review_count} reviews`
-      : "No reviews yet",
-    value: screen.review_count ? screen.user_rating / 5 : 0.5,
-    weight: WEIGHTS.crowd,
-  });
-
-  const total = breakdown.reduce((sum, b) => sum + b.value * b.weight, 0);
-  // Enhanced hardware bonuses can push the weighted total past 1.0, so clamp to
-  // keep the score on a clean 0..100 scale.
-  const score = Math.min(100, Math.round(total * 1000) / 10); // 0..100, one decimal
-
-  return { score, reason: buildReason(breakdown, dcp), breakdown };
+    return { screen, dcp, score, reason, breakdown };
+  }).sort((a, b) => b.score - a.score);
 }
+
+export function scoreScreen(
+  movie: Movie,
+  screen: Screen,
+  dcp: Dcp | null,
+): ScoredScreen {
+  const results = scoreScreens(movie, [{ screen, dcp }]);
+  return results[0];
+}
+
 
 function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
   const candidates = breakdown.filter(
@@ -831,9 +910,10 @@ export function rankScreens(
   movie: Movie,
   candidates: { screen: Screen; dcp: Dcp | null }[],
 ) {
-  return candidates
-    .filter(({ screen, dcp }) => isCompatible(screen, dcp))
-    .map(({ screen, dcp }) => ({ screen, dcp, ...scoreScreen(movie, screen, dcp) }))
+  const compatible = candidates.filter(({ screen, dcp }) => isCompatible(screen, dcp));
+  const scored = scoreScreens(movie, compatible);
+
+  return scored
     .sort((a, b) => {
       const scoreDiff = b.score - a.score;
       // Clear winner on score.
