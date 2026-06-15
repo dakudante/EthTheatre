@@ -45,11 +45,7 @@ export function ScreenCard({ screen }: { screen: Screen }) {
             <SpecValue value={screen.screen_dimensions} />
           </Row>
         )}
-        {screen.screen_spec && (
-          <Row icon={Ruler} label="Screen">
-            <SpecValue value={screen.screen_spec} />
-          </Row>
-        )}
+        {/* screen_spec removed — screen_brand + screen_dimensions replace it */}
       </dl>
 
       <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">

@@ -4,7 +4,6 @@ import {
   Cpu,
   MapPin,
   Maximize,
-  MoveDiagonal,
   Projector,
   Quote,
   Sparkles,
@@ -144,13 +143,7 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
                   value={screen.screen_dimensions}
                 />
               )}
-              {screen.screen_spec && (
-                <SpecTile
-                  label="Screen size"
-                  icon={MoveDiagonal}
-                  value={screen.screen_spec}
-                />
-              )}
+              {/* screen_spec removed — screen_brand + screen_dimensions replace it */}
               <div
                 className={cn(
                   "rounded-xl border bg-white/[0.03] px-3 py-2.5",
