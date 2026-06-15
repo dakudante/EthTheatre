@@ -234,6 +234,8 @@ function resolutionScore(res?: string | null): number {
   const v = (res ?? "").toLowerCase();
   if (v.includes("8k")) return 1;
   if (v.includes("4k")) return 0.9;
+  // IMAX 2K is higher quality than standard 2K
+  if (v.includes("imax") && v.includes("2k")) return 0.70;
   if (v.includes("2k")) return 0.55;
   return 0.4;
 }
@@ -244,7 +246,7 @@ function formatScore(dcpFormats: string[]): number {
   if (set.has("hdr") || set.has("dolby vision")) s += 0.3;
   if (set.has("hfr")) s += 0.15;
   if (set.has("3d")) s += 0.1;
-  if (set.has("imax")) s += 0.15;
+  if (set.has("imax")) s += 0.30;
   // BUG 8 FIX: Removed IMAX cross-check — with the isCompatible() DCP gate,
   // an IMAX screen without an IMAX DCP is already excluded; this bonus was
   // redundant and inflated IMAX scores over equivalent HDR screens.
@@ -476,15 +478,23 @@ function audioScore(mix?: string | null): number {
   return 0.45;
 }
 
-function projectionScore(proj?: string | null): number {
+function projectionScore(proj?: string | null, brand?: string | null, model?: string | null): number {
   const v = (proj ?? "").toLowerCase();
-  if (v.includes("rgb") && v.includes("laser")) return 1; // 4K RGB laser
+  if (v.includes("rgb") && v.includes("laser")) return 1;
   if (v.includes("4k") && v.includes("laser")) return 0.9;
   if (v.includes("4k")) return 0.78;
   if (v.includes("2k") && v.includes("laser")) return 0.62;
   if (v.includes("2k")) return 0.5;
   if (v.includes("laser")) return 0.7;
   if (v.includes("xenon")) return 0.5;
+  // KB fallback: if free-text is unrecognizable (e.g., model name), look up KB
+  const kb = getProjectorSpecs(brand, model);
+  if (kb) {
+    if (kb.type === "rgb-laser") return 1;
+    if (kb.type === "phosphor-laser") return 0.85;
+    if (kb.type === "xenon") return 0.6;
+    return 0.7;
+  }
   return 0.45;
 }
 
@@ -539,10 +549,15 @@ export function screenSizeScore(
 
 function screenRealEstateScoreDetails(screen: Screen) {
   let dims = parseScreenDimensions(screen.screen_dimensions);
-  const widthFt = dims?.widthFt ?? screen.screen_width_ft ?? null;
-  const heightFt = dims?.heightFt ?? screen.screen_height_ft ?? null;
-  if (!dims && widthFt !== null && heightFt !== null) {
-    dims = { widthFt, heightFt, areaSqFt: widthFt * heightFt };
+  if (!dims && screen.screen_spec) {
+    dims = parseScreenDimensions(screen.screen_spec);
+  }
+  if (!dims && screen.screen_width_ft && screen.screen_height_ft) {
+    dims = {
+      widthFt: screen.screen_width_ft,
+      heightFt: screen.screen_height_ft,
+      areaSqFt: screen.screen_width_ft * screen.screen_height_ft,
+    };
   }
   const projSpecs = getProjectorSpecs(screen.projector_brand, screen.projector_model);
   const scrSpecs = getScreenSpecs(screen.screen_brand);
@@ -645,7 +660,7 @@ export function scoreScreens(
     );
 
     // Hardware composite (5 sub-scores with fixed internal weights)
-    const proj = projectionScore(screen.projection_system);
+    const proj = projectionScore(screen.projection_system, screen.projector_brand, screen.projector_model);
     const snd = soundHardwareScore(screen.sound_system);
     const reDetails = screenRealEstateScoreDetails(screen);
     const realEstate = reDetails.score;
@@ -846,7 +861,6 @@ export function scoreScreen(
 function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
   const candidates = breakdown.filter(
     (b) =>
-      b.label !== "Screen size" &&
       b.label !== "Verification" &&
       b.label !== "Audience rating",
   );
@@ -1017,8 +1031,11 @@ export function dcpVariantTier(dcp: Dcp): number {
   const hasAtmos = audio.includes("atmos");
   const hasDtsX = audio.includes("dts") && audio.includes("x");
   const hasImax12ch = audio.includes("imax") && audio.includes("12");
+  const has = (tag: string) => formats.some((f) => f.includes(tag));
 
-  if (isImax && !is3D && hasImax12ch) return 1; // IMAX 2D 12-channel (best)
+  if (isImax && has('70mm') && !is3D) return 0; // IMAX 70mm 2D — absolute best
+  if (isImax && has('70mm') && is3D) return 0.5; // IMAX 70mm 3D
+  if (isImax && !is3D && hasImax12ch) return 1; // IMAX 2D 12-channel
   if (isImax && !is3D) return 2; // IMAX 2D
   if (isImax && is3D) return 3; // IMAX 3D
   if (!is3D && res4K && hasAtmos) return 4; // 4K Laser Atmos

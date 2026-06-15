@@ -514,7 +514,15 @@ function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
       aspectRatio = "IMAX(1.90:1)";
     } else {
       const primary = normalizeAspectRatio(movie.aspect_ratio_primary);
-      aspectRatio = primary.toLowerCase().includes("imax") ? primary : "IMAX(1.90:1)";
+      if (primary.toLowerCase().includes("imax")) {
+        aspectRatio = primary;
+      } else if (movie.aspect_ratio_primary?.toLowerCase().includes("scope")) {
+        aspectRatio = "Scope(2.39:1)"; // IMAX DMR of scope film is still scope
+      } else if (movie.aspect_ratio_primary?.toLowerCase().includes("flat")) {
+        aspectRatio = "Flat(1.85:1)";
+      } else {
+        aspectRatio = "IMAX(1.90:1)";
+      }
     }
   } else {
     aspectRatio = getStandardAspectRatio(movie);
