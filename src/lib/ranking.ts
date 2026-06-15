@@ -1,24 +1,16 @@
 import { z } from "zod";
+import projectorKb from "./projector-kb.json";
+import screenKb from "./screen-kb.json";
 
 // ── Projector Knowledge Base ───────────────────────────────────────────────
-const PROJECTOR_KNOWLEDGE_BASE: Record<string, {
+type ProjectorSpec = {
   type: "rgb-laser" | "phosphor-laser" | "xenon" | "unknown";
   estimatedLumens: number;
   resolution: "4K" | "2K";
   isDciCompliant: boolean;
-}> = {
-  "BARCO SP4K-55B": { type: "rgb-laser", estimatedLumens: 55000, resolution: "4K", isDciCompliant: true },
-  "BARCO DP4K-19B": { type: "rgb-laser", estimatedLumens: 19000, resolution: "4K", isDciCompliant: true },
-  "BARCO DP2K-20C": { type: "xenon", estimatedLumens: 18500, resolution: "2K", isDciCompliant: true },
-  "NEC NP-NC900C-A": { type: "xenon", estimatedLumens: 9000, resolution: "2K", isDciCompliant: true },
-  "Christie 4K RGB Laser": { type: "rgb-laser", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
-  "Christie CP4440-RGB": { type: "rgb-laser", estimatedLumens: 40000, resolution: "4K", isDciCompliant: true },
-  "Christie 4K Xenon": { type: "xenon", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
-  "Barco SP4K 25C": { type: "rgb-laser", estimatedLumens: 25000, resolution: "4K", isDciCompliant: true },
-  "Barco SP4K 20C": { type: "rgb-laser", estimatedLumens: 20000, resolution: "4K", isDciCompliant: true },
-  "Barco SP4K 35 series": { type: "rgb-laser", estimatedLumens: 35000, resolution: "4K", isDciCompliant: true },
-  "Barco DP4K 23B": { type: "rgb-laser", estimatedLumens: 23000, resolution: "4K", isDciCompliant: true },
 };
+
+const PROJECTOR_KNOWLEDGE_BASE = projectorKb as Record<string, ProjectorSpec>;
 
 // Case-insensitive lookups: live rows store brands in varying casing
 // ("BARCO SP4K-55B" vs KB key "Barco SP4K 25C").
@@ -26,39 +18,58 @@ const PROJECTOR_KB_LOWER = new Map(
   Object.entries(PROJECTOR_KNOWLEDGE_BASE).map(([k, v]) => [k.toLowerCase(), v]),
 );
 
-function getProjectorSpecs(brand: string | null, model: string | null) {
-  if (!brand || !model) return null;
-  const key = `${brand} ${model}`;
-  const exact = PROJECTOR_KNOWLEDGE_BASE[key] ?? PROJECTOR_KB_LOWER.get(key.toLowerCase());
-  if (exact) return exact;
+function medianByLumens(entries: ProjectorSpec[]): ProjectorSpec | null {
+  if (entries.length === 0) return null;
+  const sorted = [...entries].sort((a, b) => a.estimatedLumens - b.estimatedLumens);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function getProjectorSpecs(brand: string | null, model: string | null): ProjectorSpec | null {
+  if (!brand && !model) return null;
+
+  const b = (brand ?? "").toLowerCase();
+  const m = (model ?? "").toLowerCase();
+
+  if (brand && model) {
+    const key = `${brand} ${model}`;
+    const exact = PROJECTOR_KNOWLEDGE_BASE[key] ?? PROJECTOR_KB_LOWER.get(key.toLowerCase());
+    if (exact) return exact;
+  } else if (brand) {
+    const matches = Object.entries(PROJECTOR_KNOWLEDGE_BASE)
+      .filter(([key]) => key.toLowerCase().startsWith(b))
+      .map(([, v]) => v);
+    const med = medianByLumens(matches);
+    if (med) return med;
+  } else if (model) {
+    const matches = Object.entries(PROJECTOR_KNOWLEDGE_BASE)
+      .filter(([key]) => key.toLowerCase().includes(m))
+      .map(([, v]) => v);
+    const med = medianByLumens(matches);
+    if (med) return med;
+  }
+
   // Fuzzy fallback: match broad projector categories when KB has no exact entry
-  const t = key.toLowerCase();
+  const t = `${brand ?? ""} ${model ?? ""}`.trim().toLowerCase();
   if (t.includes('rgb') && t.includes('laser'))
-    return { type: 'rgb-laser' as const, estimatedLumens: 25000,
-             resolution: '4K' as const, isDciCompliant: true };
+    return { type: 'rgb-laser', estimatedLumens: 25000,
+             resolution: '4K', isDciCompliant: true };
   if (t.includes('laser') && t.includes('4k'))
-    return { type: 'phosphor-laser' as const, estimatedLumens: 20000,
-             resolution: '4K' as const, isDciCompliant: true };
+    return { type: 'phosphor-laser', estimatedLumens: 20000,
+             resolution: '4K', isDciCompliant: true };
   if (t.includes('xenon'))
-    return { type: 'xenon' as const, estimatedLumens: 15000,
+    return { type: 'xenon', estimatedLumens: 15000,
              resolution: (t.includes('4k') ? '4K' : '2K') as '4K' | '2K',
              isDciCompliant: true };
   return null;
 }
 
 // ── Screen Brand Knowledge Base ────────────────────────────────────────────
-const SCREEN_BRAND_KNOWLEDGE: Record<string, {
+type ScreenSpec = {
   gain: number;
   material: "silver" | "matte-white" | "perlux" | "unknown";
-}> = {
-  "Harkness Hugo": { gain: 1.4, material: "silver" },
-  "Harkness Perlux": { gain: 1.0, material: "matte-white" },
-  "Harkness Clarus": { gain: 1.2, material: "matte-white" },
-  // Generic fallback — live rows often store just the manufacturer.
-  "Harkness": { gain: 1.0, material: "matte-white" },
-  "STRONG MDI": { gain: 1.8, material: "silver" },
-  "MDI": { gain: 1.5, material: "silver" },
 };
+
+const SCREEN_BRAND_KNOWLEDGE = screenKb as Record<string, ScreenSpec>;
 
 const SCREEN_KB_LOWER = new Map(
   Object.entries(SCREEN_BRAND_KNOWLEDGE).map(([k, v]) => [k.toLowerCase(), v]),
@@ -88,7 +99,7 @@ function getScreenSpecs(brand: string | null) {
 // ── Screen Dimensions Parser ───────────────────────────────────────────────
 function parseScreenDimensions(dimensions: string | null): { widthFt: number; heightFt: number; areaSqFt: number } | null {
   if (!dimensions) return null;
-  const match = dimensions.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+  const match = dimensions.match(/(\d+(?:\.\d+)?)\s*(?:ft|feet|')?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(?:ft|feet|')?/i);
   if (!match) return null;
   const widthFt = parseFloat(match[1]);
   const heightFt = parseFloat(match[2]);
@@ -233,6 +244,7 @@ function formatScore(dcpFormats: string[]): number {
   if (set.has("hdr") || set.has("dolby vision")) s += 0.3;
   if (set.has("hfr")) s += 0.15;
   if (set.has("3d")) s += 0.1;
+  if (set.has("imax")) s += 0.15;
   // BUG 8 FIX: Removed IMAX cross-check — with the isCompatible() DCP gate,
   // an IMAX screen without an IMAX DCP is already excluded; this bonus was
   // redundant and inflated IMAX scores over equivalent HDR screens.
@@ -276,8 +288,8 @@ export function aspectCompatibilityScore(
       return { score: 0.05, reason: 'Scope last — 1.85 content pillarboxes on Scope' };
   }
 
-  // Only the IMAX variant actually switches ratios mid-film (weighted 70%
-  // primary / 30% secondary). A non-IMAX build of the same title ships in a
+  // Only the IMAX variant actually switches ratios mid-film (weighted 85%
+  // primary / 15% secondary). A non-IMAX build of the same title ships in a
   // single fixed container, so it must be scored against its OWN container
   // (the dcpContainer passed in), exactly like a non-variable movie.
   if (isIMAXDcp && isVariableAspect && movieAspectRatios.length >= 2) {
@@ -287,11 +299,11 @@ export function aspectCompatibilityScore(
     const primaryScore = calculateSingleAspectScore(primary, screenFormat, screenSpec);
     const secondaryScore = calculateSingleAspectScore(secondary, screenFormat, screenSpec);
 
-    const weighted = primaryScore.score * 0.7 + secondaryScore.score * 0.3;
+    const weighted = primaryScore.score * 0.85 + secondaryScore.score * 0.15;
 
     return {
       score: weighted,
-      reason: `Variable aspect: ${primaryScore.reason} (70%) + ${secondaryScore.reason} (30%)`,
+      reason: `Variable aspect: ${primaryScore.reason} (85%) + ${secondaryScore.reason} (15%)`,
     };
   }
 
@@ -526,7 +538,12 @@ export function screenSizeScore(
 }
 
 function screenRealEstateScoreDetails(screen: Screen) {
-  const dims = parseScreenDimensions(screen.screen_dimensions);
+  let dims = parseScreenDimensions(screen.screen_dimensions);
+  const widthFt = dims?.widthFt ?? screen.screen_width_ft ?? null;
+  const heightFt = dims?.heightFt ?? screen.screen_height_ft ?? null;
+  if (!dims && widthFt !== null && heightFt !== null) {
+    dims = { widthFt, heightFt, areaSqFt: widthFt * heightFt };
+  }
   const projSpecs = getProjectorSpecs(screen.projector_brand, screen.projector_model);
   const scrSpecs = getScreenSpecs(screen.screen_brand);
 

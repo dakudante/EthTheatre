@@ -1,0 +1,8 @@
+{
+  "Harkness Hugo": { "gain": 1.4, "material": "silver" },
+  "Harkness Perlux": { "gain": 1.0, "material": "matte-white" },
+  "Harkness Clarus": { "gain": 1.2, "material": "matte-white" },
+  "Harkness": { "gain": 1.0, "material": "matte-white" },
+  "STRONG MDI": { "gain": 1.8, "material": "silver" },
+  "MDI": { "gain": 1.5, "material": "silver" }
+}
