@@ -129,19 +129,18 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
                   }`}
                 />
               )}
+              {/* Screen Type + Screen Size, separated */}
               {screen.screen_brand && (
                 <SpecTile
-                  label="Screen"
-                  icon={Maximize}
-                  value={`${screen.screen_brand}${
-                    screen.screen_dimensions ? ` (${screen.screen_dimensions})` : ""
-                  }`}
+                  label="Screen type"
+                  icon={Tv}
+                  value={screen.screen_brand}
                 />
               )}
-              {screen.screen_dimensions && !screen.screen_brand && (
+              {screen.screen_dimensions && (
                 <SpecTile
                   label="Screen size"
-                  icon={MoveDiagonal}
+                  icon={Maximize}
                   value={screen.screen_dimensions}
                 />
               )}

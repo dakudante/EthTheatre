@@ -34,17 +34,14 @@ export function ScreenCard({ screen }: { screen: Screen }) {
             />
           </Row>
         )}
+        {/* Screen Type + Screen Size, separated */}
         {screen.screen_brand && (
-          <Row icon={Ruler} label="Screen">
-            <SpecValue
-              value={`${screen.screen_brand}${
-                screen.screen_dimensions ? ` (${screen.screen_dimensions})` : ""
-              }`}
-            />
+          <Row icon={Ruler} label="Screen Type">
+            <SpecValue value={screen.screen_brand} />
           </Row>
         )}
-        {screen.screen_dimensions && !screen.screen_brand && (
-          <Row icon={Ruler} label="Screen">
+        {screen.screen_dimensions && (
+          <Row icon={Ruler} label="Screen Size">
             <SpecValue value={screen.screen_dimensions} />
           </Row>
         )}
