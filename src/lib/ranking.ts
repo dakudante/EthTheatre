@@ -208,7 +208,7 @@ function resolutionScore(res?: string | null): number {
   return 0.4;
 }
 
-function formatScore(dcpFormats: string[], _movieFormats: string[]): number {
+function formatScore(dcpFormats: string[]): number {
   const set = new Set(dcpFormats.map((f) => f.toLowerCase()));
   let s = 0.4; // baseline 2D digital
   if (set.has("hdr") || set.has("dolby vision")) s += 0.3;
@@ -561,7 +561,7 @@ export function scoreScreen(
       accent: res >= 0.9 ? "premium" : "neutral",
     });
 
-    const fmt = formatScore(dcp.format, movie.format);
+    const fmt = formatScore(dcp.format);
     push({
       label: "DCP format",
       detail: dcp.format.length ? dcp.format.join(", ") : "2D",

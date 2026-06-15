@@ -1,10 +1,9 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { CalendarDays, Clock, Film, Info, Trophy } from "lucide-react";
-import { getMovie, getMovieMasterDcp, getMovieRankedVariants } from "@/lib/data";
+import { getMovie, getMovieRankedVariants } from "@/lib/data";
 import { Poster, Backdrop } from "@/components/poster";
 import { FormatBadge } from "@/components/format-badge";
-import { MasterDcpSpec } from "@/components/master-dcp-spec";
 import { VariantRankings } from "@/components/variant-rankings";
 import { Reveal } from "@/components/reveal";
 import { formatRuntime, formatDate } from "@/lib/utils";
@@ -30,16 +29,16 @@ export default async function MoviePage({
   const movie = await getMovie(params.id);
   if (!movie) notFound();
 
-  const [rankedVariants, masterDcp] = await Promise.all([
-    getMovieRankedVariants(movie.id),
-    getMovieMasterDcp(movie.id),
-  ]);
+  const rankedVariants = await getMovieRankedVariants(movie.id);
   const variants = rankedVariants?.variants ?? [];
-  const best = variants[0]?.rankings[0];
+
+  // The globally best screen across all variants (highest score, any format).
+  const allRankings = variants.flatMap((v) => v.rankings);
+  const best = allRankings.sort((a, b) => b.score - a.score)[0];
 
   return (
     <div className="pb-12">
-      {/* Hero */}
+      {/* ── Hero ── */}
       <section className="relative">
         <div className="relative h-[340px] w-full sm:h-[420px]">
           <Backdrop src={movie.backdrop} title={movie.title} />
@@ -89,18 +88,9 @@ export default async function MoviePage({
         </div>
       </section>
 
-      {/* Master DCP spec — only when a single variant exists. Multi-variant
-          titles list every build in the "Available DCP formats" chips below
-          (one master spec was the root-cause UI confusion). */}
-      {variants.length <= 1 && (
-        <section className="container mt-10">
-          <Reveal>
-            <MasterDcpSpec movie={movie} dcp={variants[0]?.dcp ?? masterDcp} />
-          </Reveal>
-        </section>
-      )}
-
-      {/* Rankings */}
+      {/* ── Rankings ──
+           The old "Master DCP Specification" block is gone. Each screen card
+           now shows the specific DCP that will play on it inline. */}
       <section className="container mt-12">
         <div className="mb-6 flex items-center gap-3">
           <span className="grid size-10 place-items-center rounded-xl bg-primary/15 text-primary">
@@ -125,17 +115,16 @@ export default async function MoviePage({
           <>
             {best && (
               <Reveal className="mb-5">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   <span className="font-medium text-foreground">
                     {best.theatre.city}
                   </span>
-                  ’s {best.screen.name} tops the {variants[0].label} list with a
-                  score of{" "}
+                  &apos;s {best.screen.name} tops the list with a score of{" "}
                   <span className="font-semibold text-primary">
                     {best.score}
                   </span>
                   .
-                </div>
+                </p>
               </Reveal>
             )}
             <VariantRankings variants={variants} />

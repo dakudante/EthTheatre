@@ -1,83 +1,61 @@
 "use client";
 
-import { useState } from "react";
-import { Layers } from "lucide-react";
 import type { RankedVariantGroup } from "@/lib/data";
 import { RankedScreenCard } from "@/components/ranked-screen-card";
-import { FormatBadge } from "@/components/format-badge";
 import { Reveal } from "@/components/reveal";
-import { cn } from "@/lib/utils";
 
 /**
- * BMS-style per-DCP-variant ranked sections: an always-visible chip row of
- * every available DCP build, a tab strip (best variant first), and the ranked
- * screen list for the selected variant.
+ * Flat, unified ranked list across ALL DCP variants.
+ *
+ * What changed:
+ *  - Removed the "Available DCP formats" chip panel at the top.
+ *  - Removed the variant tab strip (no IMAX / Dolby / Standard separation).
+ *  - All screens from every variant are merged into one list, already ordered
+ *    by score (best screen first regardless of format).
+ *  - The DCP that applies to each screen is shown inline on the card itself
+ *    (see ScreenDcpSpec inside RankedScreenCard).
+ *
+ * The variants prop still arrives pre-sorted by tier from rankByVariants(),
+ * but we merge and re-sort by score so the #1 slot is always the globally
+ * best screen+DCP combination, not just the best within the top-tier variant.
  */
-export function VariantRankings({ variants }: { variants: RankedVariantGroup[] }) {
-  const [active, setActive] = useState(0);
+export function VariantRankings({
+  variants,
+}: {
+  variants: RankedVariantGroup[];
+}) {
   if (variants.length === 0) return null;
-  const current = variants[Math.min(active, variants.length - 1)];
+
+  // Merge all ranked screens from every variant, then re-rank by score.
+  // Each entry carries its own dcp reference already (set by toRankedScreen).
+  const merged = variants
+    .flatMap((v) => v.rankings)
+    .sort((a, b) => {
+      const scoreDiff = b.score - a.score;
+      if (Math.abs(scoreDiff) > 5) return scoreDiff;
+      // Tiebreak: verified DCP wins
+      const aV = a.dcp?.verified ? 1 : 0;
+      const bV = b.dcp?.verified ? 1 : 0;
+      if (aV !== bV) return bV - aV;
+      return scoreDiff;
+    })
+    // De-dupe: a screen might appear in multiple variant groups (e.g. it can
+    // play both the standard and Atmos builds). Keep only its highest-scored
+    // appearance so each physical screen appears at most once.
+    .filter((r, _, arr) => {
+      const first = arr.find((x) => x.screen.id === r.screen.id);
+      return first === r;
+    })
+    // Re-assign rank numbers after de-dupe + re-sort
+    .map((r, i) => ({ ...r, rank: i + 1 }));
 
   return (
-    <div>
-      {/* Available DCP formats — informational, always visible */}
-      <div className="mb-5 rounded-2xl glass p-4">
-        <p className="mb-2.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          <Layers className="size-3.5" />
-          Available DCP formats
-        </p>
-        <div className="flex flex-wrap gap-1.5">
-          {variants.map((v) => (
-            <span
-              key={v.dcp.id}
-              className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-foreground/85"
-            >
-              {v.dcp.resolution}
-              <span className="text-muted-foreground">·</span>
-              {v.dcp.format.length ? v.dcp.format.join(", ") : "2D"}
-              <span className="text-muted-foreground">·</span>
-              {v.dcp.audio_mix}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* Variant tabs (best tier first) */}
-      {variants.length > 1 && (
-        <div className="no-scrollbar mb-5 flex gap-2 overflow-x-auto pb-1">
-          {variants.map((v, i) => (
-            <button
-              key={v.dcp.id}
-              onClick={() => setActive(i)}
-              className={cn(
-                "shrink-0 rounded-full border px-4 py-2 text-sm font-medium transition-colors",
-                i === active
-                  ? "border-primary/60 bg-primary/15 text-primary"
-                  : "border-white/10 bg-white/5 text-muted-foreground hover:border-white/25 hover:text-foreground",
-              )}
-            >
-              {v.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Selected variant header + ranked list */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <FormatBadge value={current.label.split(" · ")[0]} />
-        <span className="text-sm text-muted-foreground">
-          {current.rankings.length}{" "}
-          {current.rankings.length === 1 ? "screen" : "screens"} can present
-          this build
-        </span>
-      </div>
-      <div className="space-y-5">
-        {current.rankings.map((r, i) => (
-          <Reveal key={`${current.dcp.id}-${r.screen.id}`} delay={i * 0.04}>
-            <RankedScreenCard ranked={r} />
-          </Reveal>
-        ))}
-      </div>
+    <div className="space-y-5">
+      {merged.map((r, i) => (
+        <Reveal key={`${r.screen.id}-${r.dcp?.id ?? "nodcp"}`} delay={i * 0.04}>
+          <RankedScreenCard ranked={r} />
+        </Reveal>
+      ))}
     </div>
   );
 }
