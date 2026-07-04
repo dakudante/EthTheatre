@@ -190,7 +190,7 @@ const HW_SUB = {
   material: 0.15,
 };
 
-function resolutionScore(res?: string | null): number {
+export function resolutionScore(res?: string | null): number {
   const v = (res ?? "").toLowerCase();
   if (v.includes("8k")) return 1;
   if (v.includes("4k")) return 0.9;
@@ -199,7 +199,7 @@ function resolutionScore(res?: string | null): number {
   return 0.4;
 }
 
-function formatScore(dcpFormats: string[]): number {
+export function formatScore(dcpFormats: string[]): number {
   const tokens = dcpFormats.map((f) => f.toLowerCase());
   const has = (tag: string) => tokens.some((f) => f.includes(tag));
   let s = 0.4;
@@ -413,7 +413,7 @@ function calculateSingleAspectScore(
   return ASPECT_PRIORITY[ratioKey]?.[screenCat] ?? { score: 0.60, reason: 'Unknown screen category — neutral score' };
 }
 
-function audioScore(mix?: string | null): number {
+export function audioScore(mix?: string | null): number {
   const v = (mix ?? "").toLowerCase();
   if (v.includes("atmos")) return 1;
   if (v.includes("dts") && v.includes("x")) return 0.95;
@@ -434,7 +434,7 @@ function projectionScore(proj?: string | null, brand?: string | null, model?: st
   if (v.includes("2k")) return 0.5;
   if (v.includes("laser")) return 0.7;
   if (v.includes("xenon")) return 0.5;
-  const kb = getProjectorSpecs(brand, model);
+  const kb = getProjectorSpecs(brand ?? null, model ?? null);
   if (kb) {
     if (kb.type === "rgb-laser") return 1;
     if (kb.type === "phosphor-laser") return 0.85;
@@ -554,7 +554,7 @@ export function screenMaterialScore(screen: Screen, dcp: Dcp | null): number {
 }
 
 // ── Compute raw DCP quality for a single DCP ──────────────────────────────
-function rawDcpScore(dcp: Dcp | null): number {
+export function rawDcpScore(dcp: Dcp | null): number {
   if (!dcp) return 0.3;
   const res = resolutionScore(dcp.resolution);
   const fmt = formatScore(dcp.format);
@@ -909,8 +909,10 @@ export function isCompatible(screen: Screen, dcp: Dcp | null): boolean {
   if (has('epiq') && !screen.screen_format.toLowerCase().includes('epiq')) return false;
   if (has('dolby cinema') && !screen.screen_format.toLowerCase().includes('dolby')) return false;
   if (has('dolby vision') && !screen.screen_format.toLowerCase().includes('dolby')) return false;
-  // Atmos-venue builds require Atmos hardware
-  if (dcp.audio_mix.toLowerCase().includes('atmos') && !screen.sound_system.toLowerCase().includes('atmos')) return false;
+  // NOTE: Atmos DCPs carry a standard 7.1 bed layer — they play on any processor.
+  // The height channels just don't render without Atmos speakers. Venue-class
+  // routing (atmos-venue builds → Atmos screens) is already handled by
+  // selectBestDcpVariant in data.ts, so we don't gate here.
 
   return true;
 }

@@ -3,14 +3,15 @@ import "server-only";
 import { isSupabaseConfigured } from "./supabase/server";
 import { createReadClient } from "./supabase/admin";
 import {
-  resolutionScore,
-  formatScore,
-  audioScore,
-  isCompatible,
   dcpVariantTier,
+  isCompatible,
   rankByVariants,
   rankScreens,
   rankScreensDeduped,
+  resolutionScore,
+  formatScore,
+  audioScore,
+  rawDcpScore,
 } from "./ranking";
 import * as demo from "./sample-data";
 import type {
@@ -434,18 +435,8 @@ export function selectBestDcpVariant(movie: Movie, screen: Screen): ParsedDcpVar
     const tierB = dcpVariantTier(dcpB);
     if (tierA !== tierB) return tierA - tierB;
 
-    // Fallback: compare raw DCP scores
-    const scoreA =
-      resolutionScore(dcpA.resolution) * 0.40 +
-      formatScore(dcpA.format) * 0.11 +
-      audioScore(dcpA.audio_mix) * 0.24 +
-      (dcpA.verified ? 1.0 : 0.6) * 0.10;
-    const scoreB =
-      resolutionScore(dcpB.resolution) * 0.40 +
-      formatScore(dcpB.format) * 0.11 +
-      audioScore(dcpB.audio_mix) * 0.24 +
-      (dcpB.verified ? 1.0 : 0.6) * 0.10;
-    return scoreB - scoreA;
+      // Fallback: compare raw DCP scores (uses DCP_SUB weights from ranking.ts)
+      return rawDcpScore(dcpB) - rawDcpScore(dcpA);
   });
 
   return compatible[0];
