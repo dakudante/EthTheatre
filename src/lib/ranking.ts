@@ -1,7 +1,6 @@
 import { z } from "zod";
 import projectorKb from "./projector-kb.json";
 import screenKb from "./screen-kb.json";
-import type { Dcp, Movie, Screen } from "./types";
 
 // ── Projector Knowledge Base ───────────────────────────────────────────────
 type ProjectorSpec = {
@@ -25,6 +24,7 @@ function medianByLumens(entries: ProjectorSpec[]): ProjectorSpec | null {
 
 function getProjectorSpecs(brand: string | null, model: string | null): ProjectorSpec | null {
   if (!brand && !model) return null;
+
   const b = (brand ?? "").toLowerCase();
   const m = (model ?? "").toLowerCase();
 
@@ -94,9 +94,19 @@ function parseScreenDimensions(dimensions: string | null): { widthFt: number; he
   return { widthFt, heightFt, areaSqFt: widthFt * heightFt };
 }
 
+// ── types ──────────────────────────────────────────────────────────────────
+import type { Dcp, Movie, Screen } from "./types";
+
 // ── Input contracts ─────────────────────────────────────────────────────────
 export const SCREEN_FORMATS = [
-  "2D", "3D", "IMAX", "EPIQ", "PXL", "4DX", "Scope", "Flat",
+  "2D",
+  "3D",
+  "IMAX",
+  "EPIQ",
+  "PXL",
+  "4DX",
+  "Scope",
+  "Flat",
 ] as const;
 export type ScreenFormatFilter = (typeof SCREEN_FORMATS)[number];
 
@@ -142,6 +152,7 @@ export interface ScoredScreen {
 }
 
 // ── V2 Adaptive Weight System ─────────────────────────────────────────────
+
 const DCP_DOMINANT = { dcp: 0.55, aspect: 0.15, hw: 0.25, crowd: 0.05 };
 const HW_DOMINANT = { dcp: 0.15, aspect: 0.20, hw: 0.50, crowd: 0.10 };
 
@@ -221,6 +232,8 @@ export function aspectCompatibilityScore(
     return { score: 0, reason: "IMAX DCP requires IMAX projection system" };
   }
 
+  // BUG 4 FIX: Scope-last override only applies to IMAX DCPs of variable-aspect
+  // movies. Non-IMAX builds ship in a fixed container and must be scored normally.
   if (isVariableAspect && isIMAXDcp) {
     const ratios = movieAspectRatios.map(r => r.toLowerCase());
     const hasWide = ratios.some(r => r.includes('2.39') || r.includes('scope'));
@@ -265,6 +278,7 @@ function classifyScreenFormat(
 
   if ((sf.includes("70mm") || sp.includes("70mm")) && !sf.includes("imax")) return "70mm";
 
+  // FIX #5: Dolby Cinema is dual-masking — treat as its own premium category
   if (sf.includes("dolby")) return "dolby";
 
   return "standard";
@@ -280,7 +294,7 @@ function resolveRatioKey(dcpContainer: string): RatioKey {
     [/1\.33|academy/, '1.33'],
     [/1\.90|imax digital/, '1.90'],
     [/1\.85|flat/, '1.85'],
-    [/2\.35|2\.39|2\.40|scope/, '2.39'],
+    [/2\.35|2\.39|2\.40|scope/, '2.39'],  // FIX #8: added 2.35
     [/2\.20|70mm/, '2.20'],
     [/2\.76|ultra|cinerama/, '2.76'],
   ];
@@ -441,6 +455,8 @@ function soundHardwareScore(sound?: string | null): number {
   return 0.45;
 }
 
+// DEAD CODE — kept for export compatibility but not used in the scoring path.
+// FIX #15: removed dangerous free-text fallback that parsed the largest number.
 export function screenClassScore(format?: string | null): {
   value: number;
   accent: ScoreBreakdown["accent"];
@@ -458,6 +474,7 @@ export function screenClassScore(format?: string | null): {
   return { value: 0.55, accent: "neutral" };
 }
 
+// FIX #15: removed dangerous free-text fallback.
 export function screenSizeScore(
   widthFt?: number | null,
   _spec?: string | null,
@@ -507,6 +524,7 @@ function screenRealEstateScoreDetails(screen: Screen, dcp: Dcp | null) {
     densityScore = pxPerFt >= 80 ? 1.0 : pxPerFt >= 50 ? 0.9 : pxPerFt >= 30 ? 0.75 : 0.5;
   }
 
+  // FIX #11: brightness bell curve around DCI SDR spec (48 nits)
   let brightnessScore = 0.7;
   if (projSpecs && scrSpecs) {
     const areaSqM = dims.areaSqFt * 0.0929;
@@ -535,6 +553,7 @@ export function screenMaterialScore(screen: Screen, dcp: Dcp | null): number {
   }
 }
 
+// ── Compute raw DCP quality for a single DCP ──────────────────────────────
 function rawDcpScore(dcp: Dcp | null): number {
   if (!dcp) return 0.3;
   const res = resolutionScore(dcp.resolution);
@@ -542,19 +561,28 @@ function rawDcpScore(dcp: Dcp | null): number {
   const aud = audioScore(dcp.audio_mix);
   const ver = dcp.verified ? 1.0 : 0.6;
   const prem = premiumScore(dcp.format);
+  // FIX #6: weights now sum to 1.0 (0.35 + 0.15 + 0.25 + 0.10 + 0.15 = 1.0)
   return res * DCP_SUB.resolution + fmt * DCP_SUB.format + aud * DCP_SUB.audio + ver * DCP_SUB.verification + prem * DCP_SUB.premium;
 }
 
+// ── Compute weight regime from a set of unique DCPs ────────────────────────
 function computeWeightRegime(uniqueDcps: (Dcp | null)[]) {
   const scores = uniqueDcps.map(rawDcpScore);
   const spread = stddev(scores);
   return adaptiveWeights(spread);
 }
 
+/**
+ * V2: Score all candidate screens together.
+ * FIX #1: DCP spread is measured over the *unique* DCPs for this movie,
+ * not over every screen×variant assignment. This makes the weighting regime
+ * stable regardless of which screens are in the candidate pool.
+ */
 export function scoreScreens(
   movie: Movie,
   candidates: Array<{ screen: Screen; dcp: Dcp | null }>,
 ): Array<{ screen: Screen; dcp: Dcp | null; score: number; reason: string; breakdown: ScoreBreakdown[] }> {
+  // Extract unique DCPs to compute a stable weight regime
   const seenDcpIds = new Set<string>();
   const uniqueDcps: (Dcp | null)[] = [];
   for (const { dcp } of candidates) {
@@ -606,6 +634,7 @@ export function scoreScreens(
       material * HW_SUB.material
     );
 
+    // FIX #9: crowd = 0.5 neutral when unrated (review_count === 0)
     const crowdScore = (screen.user_rating != null && screen.review_count > 0)
       ? screen.user_rating / 5
       : 0.5;
@@ -618,6 +647,7 @@ export function scoreScreens(
     );
     const score = Math.round(Math.min(100, raw * 100) * 10) / 10;
 
+    // ── Breakdown population ──────────────────────────────────────────────
     if (dcp) {
       const res = resolutionScore(dcp.resolution);
       push({
@@ -854,6 +884,12 @@ function buildReason(breakdown: ScoreBreakdown[], dcp: Dcp | null): string {
 const hasImax = (value?: string | null) =>
   (value ?? "").toLowerCase().includes("imax");
 
+/**
+ * FIX #2: Venue-class gating.
+ * In addition to IMAX/70mm gates, EPIQ and Dolby Cinema DCPs are now gated
+ * to their respective screen types. Atmos-venue builds are gated to screens
+ * that actually have Atmos hardware.
+ */
 export function isCompatible(screen: Screen, dcp: Dcp | null): boolean {
   if (!dcp) return true;
 
@@ -869,14 +905,17 @@ export function isCompatible(screen: Screen, dcp: Dcp | null): boolean {
   if (screenCat === 'imax_70mm' && !(has('imax') && has('70mm'))) return false;
   if (screenCat === '70mm' && !has('70mm')) return false;
 
+  // FIX #2: gate venue-class builds
   if (has('epiq') && !screen.screen_format.toLowerCase().includes('epiq')) return false;
   if (has('dolby cinema') && !screen.screen_format.toLowerCase().includes('dolby')) return false;
   if (has('dolby vision') && !screen.screen_format.toLowerCase().includes('dolby')) return false;
+  // Atmos-venue builds require Atmos hardware
   if (dcp.audio_mix.toLowerCase().includes('atmos') && !screen.sound_system.toLowerCase().includes('atmos')) return false;
 
   return true;
 }
 
+/** Rank a set of candidate screens for a movie (highest score first). */
 export function rankScreens(
   movie: Movie,
   candidates: { screen: Screen; dcp: Dcp | null }[],
@@ -884,6 +923,7 @@ export function rankScreens(
   const compatible = candidates.filter(({ screen, dcp }) => isCompatible(screen, dcp));
   const scored = scoreScreens(movie, compatible);
 
+  // FIX #10: transitive comparator — bucketed sort
   return scored
     .sort((a, b) => {
       const bandA = Math.floor(a.score / 5);
@@ -897,6 +937,11 @@ export function rankScreens(
     .map((c, i) => ({ ...c, rank: i + 1 }));
 }
 
+/**
+ * Like rankScreens, but for candidate lists where a screen may appear once per
+ * compatible DCP variant: keeps only each screen's best-scoring assignment,
+ * then re-ranks 1..N.
+ */
 export function rankScreensDeduped(
   movie: Movie,
   candidates: { screen: Screen; dcp: Dcp | null }[],
@@ -914,10 +959,13 @@ export function rankScreensDeduped(
     .map((c, i) => ({ ...c, rank: i + 1 }));
 }
 
+// ── DCP variant grouping (BMS-style per-presentation sections) ─────────────
+
+/** Canonical label for a DCP variant used as a tab/section heading. */
 export function dcpVariantLabel(dcp: Dcp): string {
   const formats = dcp.format.map((f) => f.toLowerCase());
   const isImax = formats.some((f) => f.includes("imax"));
-  const is3D = formats.some((f) => f.includes("3d"));
+  const is3D = formats.some((f) => f.includes("3d"));  // FIX #7: substring match
   const isDolbyVision = formats.some(
     (f) => f.includes("dolby vision") || f.includes("hdr"),
   );
@@ -930,6 +978,7 @@ export function dcpVariantLabel(dcp: Dcp): string {
   return `Standard 2D · ${res} · ${audio}`;
 }
 
+/** Priority tier for sorting variant tabs (lower = shown first / best). */
 export function dcpVariantTier(dcp: Dcp): number {
   const formats = dcp.format.map((f) => f.toLowerCase());
   const isImax = formats.some((f) => f.includes("imax"));
@@ -958,6 +1007,7 @@ export function dcpVariantTier(dcp: Dcp): number {
   return 99;
 }
 
+/** Group and rank screens by DCP variant, sorted best-variant-first. */
 export function rankByVariants(
   movie: Movie,
   candidates: { screen: Screen; dcp: Dcp | null }[],
