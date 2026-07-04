@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { RecommendationQuerySchema } from "@/lib/ranking";
-import { getMovie, getMovieRankings } from "@/lib/data";
+import { getMovie, getMovieRankedVariants } from "@/lib/data";
 import type { RankedScreen } from "@/lib/types";
 
 // Depends on the request query string, so never statically cached.
@@ -42,11 +42,23 @@ export async function GET(
     return NextResponse.json({ error: "Movie not found" }, { status: 404 });
   }
 
-  let rankings = await getMovieRankings(movieId);
+  // City filtering is handled at the data layer by getMovieRankedVariants.
+  const result = await getMovieRankedVariants(movieId, city);
 
-  if (city) {
-    const c = city.toLowerCase();
-    rankings = rankings.filter((r) => r.theatre.city.toLowerCase().includes(c));
+  // Flatten all variant groups into a single ranked list, deduplicated by
+  // screen (keep the best-scoring entry per screen across variants).
+  let rankings: RankedScreen[] = [];
+  if (result) {
+    const best = new Map<string, RankedScreen>();
+    for (const group of result.variants) {
+      for (const r of group.rankings) {
+        const existing = best.get(r.screen.id);
+        if (!existing || r.score > existing.score) {
+          best.set(r.screen.id, r);
+        }
+      }
+    }
+    rankings = Array.from(best.values()).sort((a, b) => b.score - a.score);
   }
 
   if (format) {

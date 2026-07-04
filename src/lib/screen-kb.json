@@ -4,5 +4,9 @@
   "Harkness Clarus": { "gain": 1.2, "material": "matte-white" },
   "Harkness": { "gain": 1.0, "material": "matte-white" },
   "STRONG MDI": { "gain": 1.8, "material": "silver" },
-  "MDI": { "gain": 1.5, "material": "silver" }
+  "MDI": { "gain": 1.5, "material": "silver" },
+  "Galalite Mirage": { "gain": 1.4, "material": "silver" },
+  "Galalite Prism": { "gain": 1.2, "material": "matte-white" },
+  "Galalite": { "gain": 1.3, "material": "matte-white" },
+  "Galalite Prism 3D": { "gain": 1.8, "material": "silver" }
 }

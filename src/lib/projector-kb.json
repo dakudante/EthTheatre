@@ -9,5 +9,14 @@
   "Barco SP4K 25C": { "type": "rgb-laser", "estimatedLumens": 25000, "resolution": "4K", "isDciCompliant": true },
   "Barco SP4K 20C": { "type": "rgb-laser", "estimatedLumens": 20000, "resolution": "4K", "isDciCompliant": true },
   "Barco SP4K 35 series": { "type": "rgb-laser", "estimatedLumens": 35000, "resolution": "4K", "isDciCompliant": true },
-  "Barco DP4K 23B": { "type": "rgb-laser", "estimatedLumens": 23000, "resolution": "4K", "isDciCompliant": true }
+  "Barco DP4K 23B": { "type": "rgb-laser", "estimatedLumens": 23000, "resolution": "4K", "isDciCompliant": true },
+  "GDC SX-3000": { "type": "xenon", "estimatedLumens": 10000, "resolution": "2K", "isDciCompliant": true },
+  "GDC SX-4000": { "type": "xenon", "estimatedLumens": 12000, "resolution": "4K", "isDciCompliant": true },
+  "NEC NC1201L": { "type": "phosphor-laser", "estimatedLumens": 12000, "resolution": "2K", "isDciCompliant": true },
+  "NEC NC3541L": { "type": "rgb-laser", "estimatedLumens": 35000, "resolution": "4K", "isDciCompliant": true },
+  "Christie CP4335-RGB": { "type": "rgb-laser", "estimatedLumens": 43000, "resolution": "4K", "isDciCompliant": true },
+  "Christie CP2315-RGB": { "type": "rgb-laser", "estimatedLumens": 15000, "resolution": "2K", "isDciCompliant": true },
+  "Christie CP42LH": { "type": "rgb-laser", "estimatedLumens": 42000, "resolution": "4K", "isDciCompliant": true },
+  "Barco DP2K-15C": { "type": "xenon", "estimatedLumens": 15000, "resolution": "2K", "isDciCompliant": true },
+  "Barco DP4K-30L": { "type": "rgb-laser", "estimatedLumens": 30000, "resolution": "4K", "isDciCompliant": true }
 }

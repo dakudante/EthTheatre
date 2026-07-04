@@ -51,7 +51,7 @@ export function ScreenCard({ screen }: { screen: Screen }) {
       <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">
         <span className="inline-flex items-center gap-1 text-amber-300">
           <Star className="size-3.5 fill-amber-400 text-amber-400" />
-          {screen.user_rating.toFixed(1)}
+          {(screen.user_rating ?? 0).toFixed(1)}
         </span>
         {screen.number_of_seats && (
           <span className="inline-flex items-center gap-1">

@@ -99,7 +99,7 @@ export default async function ScreenPage({
         <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
           <span className="inline-flex items-center gap-1.5 text-amber-300">
             <Star className="size-4 fill-amber-400 text-amber-400" />
-            <span className="font-medium">{screen.user_rating.toFixed(1)}</span>
+            <span className="font-medium">{(screen.user_rating ?? 0).toFixed(1)}</span>
             <span className="text-muted-foreground">
               · {screen.review_count.toLocaleString()} reviews
             </span>

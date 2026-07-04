@@ -24,7 +24,7 @@ export interface Screen {
   screen_spec: string | null;
   number_of_seats: number | null;
   three_d_system: string | null;
-  user_rating: number;
+  user_rating: number | null;
   review_count: number;
   created_at: string;
   // Technical hardware fields (live: from screens table; demo: null)

@@ -3,8 +3,11 @@ import "server-only";
 import { isSupabaseConfigured } from "./supabase/server";
 import { createReadClient } from "./supabase/admin";
 import {
-  dcpVariantTier,
+  resolutionScore,
+  formatScore,
+  audioScore,
   isCompatible,
+  dcpVariantTier,
   rankByVariants,
   rankScreens,
   rankScreensDeduped,
@@ -201,7 +204,7 @@ function mapScreen(r: DbScreenRow): Screen {
     screen_spec: r.screen_dimensions ?? null,
     number_of_seats: r.number_of_seats ?? null,
     three_d_system: r.three_d_system ?? null,
-    user_rating: r.user_rating ?? 0,
+    user_rating: r.user_rating ?? null,
     review_count: r.review_count ?? 0,
     created_at: EPOCH,
     // NEW FIELDS
@@ -354,6 +357,7 @@ export interface ParsedDcpVariant {
   audioChannels: string | null;
   audioFormat: string | null;
   is3D: boolean;
+  is70mm: boolean;
   rawSpec: string;
 }
 
@@ -383,8 +387,9 @@ export function parseDcpVariant(raw: string): ParsedDcpVariant {
   else if (lower.includes("5.1")) audioChannels = "5.1";
 
   const is3D = lower.includes("3d");
+  const is70mm = lower.includes("70mm");
 
-  return { venueType: "", resolution, audioChannels, audioFormat, is3D, rawSpec: raw };
+  return { venueType: "", resolution, audioChannels, audioFormat, is3D, is70mm, rawSpec: raw };
 }
 
 export function getDcpVariantsForMovie(movie: Movie): ParsedDcpVariant[] {
@@ -409,52 +414,41 @@ export function getDcpVariantsForMovie(movie: Movie): ParsedDcpVariant[] {
   return variants;
 }
 
-export function selectBestDcpVariant(
-  movie: Movie,
-  screen: Screen,
-): ParsedDcpVariant | null {
+export function selectBestDcpVariant(movie: Movie, screen: Screen): ParsedDcpVariant | null {
   const variants = getDcpVariantsForMovie(movie);
   if (variants.length === 0) return null;
 
-  const screenHasAtmos = screen.sound_system.toLowerCase().includes("atmos");
-  const screenIsIMAX = screen.screen_format.toLowerCase().includes("imax");
-  const screenIsEPIQ = screen.screen_format.toLowerCase().includes("epiq");
-  const screenIsDolby = screen.screen_format.toLowerCase().includes("dolby");
+  // Filter to compatible variants
+  const compatible = variants.filter((v) => {
+    const dcp = convertVariantToDcp(v, movie);
+    return isCompatible(screen, dcp);
+  });
 
-  let compatible = variants;
+  if (compatible.length === 0) return null;
 
-  if (screenIsIMAX) {
-    const imax = variants.filter((v) => v.venueType === "imax");
-    if (imax.length > 0) compatible = imax;
-    else {
-      const atmos = variants.filter((v) => v.venueType === "atmos");
-      if (atmos.length > 0) compatible = atmos;
-    }
-  } else if (screenIsDolby) {
-    const dolby = variants.filter((v) => v.venueType === "dolby_cinema");
-    if (dolby.length > 0) compatible = dolby;
-    else {
-      const atmos = variants.filter((v) => v.venueType === "atmos");
-      if (atmos.length > 0) compatible = atmos;
-    }
-  } else if (screenHasAtmos) {
-    const atmos = variants.filter((v) => v.venueType === "atmos");
-    if (atmos.length > 0) compatible = atmos;
-  } else if (screenIsEPIQ) {
-    const epiq = variants.filter((v) => v.venueType === "epiq");
-    if (epiq.length > 0) compatible = epiq;
-  } else {
-    const normal = variants.filter((v) => v.venueType === "normal");
-    if (normal.length > 0) compatible = normal;
-  }
+  // Sort by tier, then by raw DCP score
+  compatible.sort((a, b) => {
+    const dcpA = convertVariantToDcp(a, movie);
+    const dcpB = convertVariantToDcp(b, movie);
+    const tierA = dcpVariantTier(dcpA);
+    const tierB = dcpVariantTier(dcpB);
+    if (tierA !== tierB) return tierA - tierB;
 
-  compatible = [...compatible].sort(
-    (a, b) =>
-      dcpVariantTier(convertVariantToDcp(a, movie)) -
-      dcpVariantTier(convertVariantToDcp(b, movie)),
-  );
+    // Fallback: compare raw DCP scores
+    const scoreA =
+      resolutionScore(dcpA.resolution) * 0.40 +
+      formatScore(dcpA.format) * 0.11 +
+      audioScore(dcpA.audio_mix) * 0.24 +
+      (dcpA.verified ? 1.0 : 0.6) * 0.10;
+    const scoreB =
+      resolutionScore(dcpB.resolution) * 0.40 +
+      formatScore(dcpB.format) * 0.11 +
+      audioScore(dcpB.audio_mix) * 0.24 +
+      (dcpB.verified ? 1.0 : 0.6) * 0.10;
+    return scoreB - scoreA;
+  });
 
-  return compatible[0] ?? null;
+  return compatible[0];
 }
 
 const VARIANT_AUDIO_LABELS: Record<string, string> = {
@@ -498,9 +492,12 @@ function getStandardAspectRatio(movie: Movie): string {
 function convertVariantToDcp(variant: ParsedDcpVariant, movie: Movie): Dcp {
   const format: string[] = [];
   if (variant.is3D) format.push("3D");
-  if (variant.venueType === "imax") format.push("IMAX");
+  if (variant.venueType === "imax") {
+    format.push("IMAX");
+    if (variant.is70mm) format.push("70mm");
+  }
   if (variant.venueType === "epiq") format.push("EPIQ");
-  if (movie.venue_types.includes("Dolby Vision")) format.push("Dolby Vision");
+  if (variant.venueType === "dolby_cinema" && movie.venue_types.includes("Dolby Vision")) format.push("Dolby Vision");
   if (movie.is_upscaled) format.push("Upscaled");
 
   const resolution = variant.resolution || "2K";
@@ -668,7 +665,7 @@ async function buildMovieCandidates(
     // screens are then limited to those theatres in-query, and paginated.
     // Filters (.eq/.in) must precede transforms (.order/.range) on the builder.
     let theatreQuery = supabase.from("theatres").select("*");
-    if (city) theatreQuery = theatreQuery.eq("location", city);
+    if (city) theatreQuery = theatreQuery.ilike("location", `%${city}%`);
     const { data: theatreRows, error: theatreErr } = await theatreQuery.order(
       "name",
       { ascending: true },
@@ -709,9 +706,23 @@ async function buildMovieCandidates(
     screens = screens.filter((s) => matching.has(s.theatre_id));
   }
 
-  // Every screen × DCP variant it can physically present. buildDcpVariants
-  // always yields ≥1 variant (V2 sheet in demo, synthetic fallback in live),
-  // so the dcp_variants sheet is the sole DCP source.
+  // When V2 distributor variants exist, use selectBestDcpVariant to pick one
+  // DCP per screen (source of truth for venue-class gating). This ensures
+  // IMAX screens get IMAX DCPs, Dolby screens get Dolby DCPs, etc.
+  const parsedVariants = getDcpVariantsForMovie(movie);
+  if (parsedVariants.length > 0) {
+    const candidates = screens
+      .map((screen) => {
+        const variant = selectBestDcpVariant(movie, screen);
+        if (!variant) return null;
+        const dcp = convertVariantToDcp(variant, movie);
+        return { screen, dcp };
+      })
+      .filter((c): c is { screen: Screen; dcp: Dcp } => c !== null);
+    return { movie, candidates, theatres };
+  }
+
+  // Legacy fallback: pair every screen with every compatible variant.
   const variants = buildDcpVariants(movie, row);
   const candidates = screens.flatMap((screen) =>
     variants
@@ -736,7 +747,7 @@ function toRankedScreen(
     screen: r.screen,
     theatre,
     dcp: r.dcp,
-    showtimes: generateShowtimes(r.screen, movie),
+    showtimes: DEMO_MODE ? generateShowtimes(r.screen, movie) : [],
   };
 }
 

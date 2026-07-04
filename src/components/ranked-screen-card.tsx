@@ -280,7 +280,7 @@ export function RankedScreenCard({ ranked }: { ranked: RankedScreen }) {
           {/* Rating + showtimes */}
           <div className="mt-4 flex items-center gap-1.5 text-sm">
             <Star className="size-4 fill-amber-400 text-amber-400" />
-            <span className="font-medium">{screen.user_rating.toFixed(1)}</span>
+            <span className="font-medium">{(screen.user_rating ?? 0).toFixed(1)}</span>
             <span className="text-muted-foreground">
               ({screen.review_count.toLocaleString()} reviews)
             </span>
